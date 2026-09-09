@@ -9,7 +9,7 @@ set(CMAKE_BUILD_TYPE Release)
 
 # ncnn prebuilt location (downloaded by CI): app/ncnn-android/
 # layout: <abi>/lib/libncnn.so + <abi>/include/ncnn/...
-set(NCNN_ROOT ${CMAKE_SOURCE_DIR}/../../ncnn-android)
+set(NCNN_ROOT ${CMAKE_SOURCE_DIR}/../../../ncnn-android)
 
 find_package(Vulkan REQUIRED)
 
