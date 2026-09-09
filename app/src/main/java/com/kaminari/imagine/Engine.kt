@@ -15,15 +15,26 @@ object Engine {
 
     private const val TAG = "ImagineEngine"
 
-    init {
+    private val loaded: Boolean = try {
         System.loadLibrary("engine_jni")
+        true
+    } catch (e: UnsatisfiedLinkError) {
+        Log.e(TAG, "Failed to load engine_jni: ${e.message}")
+        false
+    } catch (e: Throwable) {
+        Log.e(TAG, "Failed to load engine_jni", e)
+        false
     }
 
+    /** External native methods — calling them when !loaded will throw. */
     external fun initGpu(): Boolean
     external fun gpuCount(): Int
     external fun loadModel(paramPath: String, binPath: String, scale: Int, tilesize: Int, prepadding: Int): Boolean
     external fun processImage(input: ByteArray, width: Int, height: Int): ByteArray?
     external fun destroy()
+
+    /** True if the native library loaded successfully. */
+    val nativeAvailable: Boolean get() = loaded
 
     /** Model definitions matching assets/models/ file names. */
     data class ModelInfo(
@@ -49,12 +60,18 @@ object Engine {
     /** Initialize Vulkan and extract bundled models from assets to filesDir. */
     fun init(context: Context): Boolean {
         if (initialized) return true
-        val gpuOk = initGpu()
-        if (gpuOk) {
-            extractBundledModels(context)
+        if (!nativeAvailable) return false
+        return try {
+            val gpuOk = initGpu()
+            if (gpuOk) {
+                extractBundledModels(context)
+            }
+            initialized = gpuOk
+            gpuOk
+        } catch (e: Throwable) {
+            Log.e(TAG, "Engine init failed", e)
+            false
         }
-        initialized = gpuOk
-        return gpuOk
     }
 
     private fun extractBundledModels(context: Context) {
@@ -90,17 +107,24 @@ object Engine {
     }
 
     fun load(context: Context, model: ModelInfo): Boolean {
+        if (!nativeAvailable) return false
         if (!ensureModelExtracted(context, model)) return false
         val dir = File(context.filesDir, "models")
-        return loadModel(
-            File(dir, File(model.assetParam).name).absolutePath,
-            File(dir, File(model.assetBin).name).absolutePath,
-            model.scale, 0, model.prepadding
-        )
+        return try {
+            loadModel(
+                File(dir, File(model.assetParam).name).absolutePath,
+                File(dir, File(model.assetBin).name).absolutePath,
+                model.scale, 0, model.prepadding
+            )
+        } catch (e: Throwable) {
+            Log.e(TAG, "loadModel failed", e)
+            false
+        }
     }
 
     /** Enhance a bitmap. Returns upscaled bitmap or null on failure. */
     fun process(bitmap: Bitmap): Bitmap? {
+        if (!nativeAvailable) return null
         val w = bitmap.width
         val h = bitmap.height
 
@@ -108,7 +132,12 @@ object Engine {
         val rgba = ByteArray(w * h * 4)
         bitmap.copyPixelsToBuffer(ByteBuffer.wrap(rgba))
 
-        val outBytes = processImage(rgba, w, h) ?: return null
+        val outBytes = try {
+            processImage(rgba, w, h) ?: return null
+        } catch (e: Throwable) {
+            Log.e(TAG, "processImage failed", e)
+            return null
+        }
 
         // output size = (w*scale) * (h*scale) * 4  =>  scale = sqrt(size / (w*h*4))
         val rawScale = outBytes.size.toDouble() / (w * h * 4)
@@ -124,6 +153,6 @@ object Engine {
     }
 
     fun cleanup() {
-        runCatching { destroy() }
+        if (nativeAvailable) runCatching { destroy() }
     }
 }

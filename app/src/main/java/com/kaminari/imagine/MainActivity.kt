@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -67,21 +68,33 @@ class MainActivity : ComponentActivity() {
     private var sliderPosition by mutableFloatStateOf(0.5f)
     private var scaleMultiplier by mutableIntStateOf(4)
     private var targetResolution by mutableStateOf("")
-    private var cloudApiKey by mutableStateOf(
-        getPreferences(MODE_PRIVATE).getString("replicate_api_key", "") ?: ""
-    )
+    private var cloudApiKey by mutableStateOf("")
+    private var crashReporter: CrashReporter? = null
+
+    override fun attachBaseContext(newBase: android.content.Context) {
+        super.attachBaseContext(newBase)
+        // Install crash logger as early as possible so even init failures are captured
+        crashReporter = CrashReporter.install(newBase)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Init engine
+        // read persisted API token (context is ready here, NOT in property initializers)
+        cloudApiKey = getPreferences(MODE_PRIVATE).getString("replicate_api_key", "") ?: ""
+
+        // Init engine (native lib failure must not crash the app)
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 engineReady = Engine.init(this@MainActivity)
                 if (engineReady) {
                     gpuName = "Vulkan GPU (${Engine.gpuCount()} device(s))"
+                } else {
+                    CrashReporter.log(this@MainActivity, "Engine", "GPU init failed (no Vulkan or native lib missing)")
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                Log.e("Imagine", "Engine init failed", e)
+                CrashReporter.log(this@MainActivity, "Engine", "init exception", e)
                 engineReady = false
             }
         }
@@ -303,6 +316,7 @@ class MainActivity : ComponentActivity() {
             withContext(Dispatchers.Main) {
                 Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
             }
+            CrashReporter.log(context, "Enhance", "exception during enhancement", e)
         } finally {
             isProcessing = false
             processingStatus = ""
@@ -364,6 +378,7 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(context, "Saved to Pictures/Imagine", Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
             Toast.makeText(context, "Save failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            CrashReporter.log(context, "Save", "save failed", e)
         }
     }
 }
