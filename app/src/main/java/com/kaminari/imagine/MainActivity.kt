@@ -67,7 +67,9 @@ class MainActivity : ComponentActivity() {
     private var sliderPosition by mutableFloatStateOf(0.5f)
     private var scaleMultiplier by mutableIntStateOf(4)
     private var targetResolution by mutableStateOf("")
-    private var cloudApiKey by mutableStateOf("")
+    private var cloudApiKey by mutableStateOf(
+        getPreferences(MODE_PRIVATE).getString("replicate_api_key", "") ?: ""
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -122,7 +124,7 @@ class MainActivity : ComponentActivity() {
             uri?.let {
                 val bitmap = try {
                     contentResolver.openInputStream(it)?.use { stream ->
-                        BitmapFactory.decodeStream(stream)
+                        decodeSampled(stream, 3072)
                     }
                 } catch (e: Exception) { null }
                 if (bitmap != null) {
@@ -171,9 +173,10 @@ class MainActivity : ComponentActivity() {
                 )
             } else {
                 PreviewSection(
-                    bitmap = selectedBitmap!!,
+                    bitmap = enhancedBitmap ?: selectedBitmap!!,
                     isProcessing = isProcessing,
-                    processingStatus = processingStatus
+                    processingStatus = processingStatus,
+                    isEnhanced = enhancedBitmap != null
                 )
             }
 
@@ -187,7 +190,11 @@ class MainActivity : ComponentActivity() {
                         selected = selectedCloudModel,
                         onSelect = { selectedCloudModel = it },
                         apiKey = cloudApiKey,
-                        onApiKeyChange = { cloudApiKey = it }
+                        onApiKeyChange = {
+                            cloudApiKey = it
+                            getPreferences(MODE_PRIVATE).edit()
+                                .putString("replicate_api_key", it.trim()).apply()
+                        }
                     )
                 } else {
                     ModelSelector(
@@ -199,12 +206,14 @@ class MainActivity : ComponentActivity() {
 
                 Spacer(Modifier.height(12.dp))
 
-                // Scale options
+                // Scale options (multiplier only meaningful for cloud models;
+                // on-device models carry their own native scale)
                 ScaleOptions(
                     scale = scaleMultiplier,
                     onScaleChange = { scaleMultiplier = it },
                     resolution = targetResolution,
-                    onResolutionChange = { targetResolution = it }
+                    onResolutionChange = { targetResolution = it },
+                    showMultiplier = useCloud
                 )
 
                 Spacer(Modifier.height(12.dp))
@@ -215,7 +224,12 @@ class MainActivity : ComponentActivity() {
                     hasResult = enhancedBitmap != null,
                     showCompare = showCompare,
                     onEnhance = {
-                        if (!useCloud && !engineReady) {
+                        if (useCloud) {
+                            if (cloudApiKey.isBlank()) {
+                                Toast.makeText(context, "Cloud mode needs a Replicate API token. Enter it above.", Toast.LENGTH_LONG).show()
+                                return@ActionButtons
+                            }
+                        } else if (!engineReady) {
                             Toast.makeText(context, "GPU not available. Try cloud mode.", Toast.LENGTH_LONG).show()
                             return@ActionButtons
                         }
@@ -251,7 +265,11 @@ class MainActivity : ComponentActivity() {
                         modelId = selectedCloudModel.id,
                         scale = scaleMultiplier
                     ) { status -> processingStatus = status }
-                    result.onSuccess { enhancedBitmap = applyTargetResolution(it) }
+                    result.onSuccess {
+                        enhancedBitmap = applyTargetResolution(it)
+                        sliderPosition = 0.5f
+                        showCompare = true
+                    }
                     result.onFailure { e ->
                         withContext(Dispatchers.Main) {
                             Toast.makeText(context, "Cloud error: ${e.message}", Toast.LENGTH_LONG).show()
@@ -270,7 +288,11 @@ class MainActivity : ComponentActivity() {
                     val result = Engine.process(bitmap)
                     processingStatus = ""
                     enhancedBitmap = result?.let { applyTargetResolution(it) }
-                    if (result == null) {
+                    if (result != null) {
+                        // jump straight to the before/after comparison
+                        sliderPosition = 0.5f
+                        showCompare = true
+                    } else {
                         withContext(Dispatchers.Main) {
                             Toast.makeText(context, "Enhancement failed (GPU OOM?)", Toast.LENGTH_LONG).show()
                         }
@@ -296,6 +318,32 @@ class MainActivity : ComponentActivity() {
         val th = m.groupValues[2].toIntOrNull() ?: return src
         if (tw <= 0 || th <= 0 || (tw == src.width && th == src.height)) return src
         return Bitmap.createScaledBitmap(src, tw, th, true)
+    }
+
+    /** Decode a stream to a bitmap no larger than [maxDim], sampling first to avoid OOM. */
+    private fun decodeSampled(stream: java.io.InputStream, maxDim: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        // count single pass for bounds
+        val bytes = stream.readBytes()
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        while (bounds.outWidth / sample > maxDim * 2 || bounds.outHeight / sample > maxDim * 2) {
+            sample *= 2
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        var bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
+        // final exact cap
+        val longest = maxOf(bmp.width, bmp.height)
+        if (longest > maxDim) {
+            val ratio = maxDim.toFloat() / longest
+            bmp = Bitmap.createScaledBitmap(
+                bmp,
+                (bmp.width * ratio).toInt().coerceAtLeast(1),
+                (bmp.height * ratio).toInt().coerceAtLeast(1),
+                true
+            )
+        }
+        return bmp
     }
 
     private fun saveImage(bitmap: Bitmap, context: android.content.Context) {
@@ -459,7 +507,12 @@ private fun EmptyStateSection(onPick: () -> Unit) {
 }
 
 @Composable
-private fun PreviewSection(bitmap: Bitmap, isProcessing: Boolean, processingStatus: String) {
+private fun PreviewSection(
+    bitmap: Bitmap,
+    isProcessing: Boolean,
+    processingStatus: String,
+    isEnhanced: Boolean
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -475,10 +528,20 @@ private fun PreviewSection(bitmap: Bitmap, isProcessing: Boolean, processingStat
     ) {
         Image(
             bitmap = bitmap.asImageBitmap(),
-            contentDescription = "Selected",
+            contentDescription = if (isEnhanced) "Enhanced" else "Selected",
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Fit
         )
+
+        if (isEnhanced && !isProcessing) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(8.dp)
+            ) {
+                Label("ENHANCED", Color(0xFFD9F2E6))
+            }
+        }
 
         if (isProcessing) {
             // Processing overlay
@@ -727,7 +790,7 @@ private fun CloudModelSelector(
             value = apiKey,
             onValueChange = onApiKeyChange,
             placeholder = {
-                Text("Replicate API key", color = Color(0xFF9A91A8), fontSize = 13.sp)
+                Text("Replicate API token", color = Color(0xFF9A91A8), fontSize = 13.sp)
             },
             modifier = Modifier.fillMaxWidth(),
             textStyle = androidx.compose.ui.text.TextStyle(
@@ -742,6 +805,14 @@ private fun CloudModelSelector(
             ),
             shape = RoundedCornerShape(12.dp)
         )
+        if (apiKey.isBlank()) {
+            Text(
+                "Get a free token at replicate.com/account/api-tokens",
+                fontSize = 11.sp,
+                color = Color(0xFF9A91A8),
+                modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+            )
+        }
     }
 }
 
@@ -795,7 +866,8 @@ private fun ScaleOptions(
     scale: Int,
     onScaleChange: (Int) -> Unit,
     resolution: String,
-    onResolutionChange: (String) -> Unit
+    onResolutionChange: (String) -> Unit,
+    showMultiplier: Boolean
 ) {
     Column(
         modifier = Modifier
@@ -823,29 +895,32 @@ private fun ScaleOptions(
         )
         Spacer(Modifier.height(8.dp))
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                "Multiplier:",
-                fontSize = 12.sp,
-                color = Color(0xFF9A91A8)
-            )
-            listOf(2, 3, 4).forEach { s ->
-                ScaleChip(
-                    value = "${s}x",
-                    selected = scale == s,
-                    onClick = { onScaleChange(s) }
+        if (showMultiplier) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Multiplier:",
+                    fontSize = 12.sp,
+                    color = Color(0xFF9A91A8)
                 )
+                listOf(2, 3, 4).forEach { s ->
+                    ScaleChip(
+                        value = "${s}x",
+                        selected = scale == s,
+                        onClick = { onScaleChange(s) }
+                    )
+                }
             }
+            Spacer(Modifier.height(8.dp))
         }
-
-        Spacer(Modifier.height(8.dp))
 
         OutlinedTextField(
             value = resolution,
-            onValueChange = onResolutionChange,
+            onValueChange = { input ->
+                onResolutionChange(input.filter { it.isDigit() || it == 'x' || it == 'X' || it == '×' })
+            },
             placeholder = {
                 Text("Target resolution (e.g., 1920x1080)", color = Color(0xFF9A91A8), fontSize = 13.sp)
             },

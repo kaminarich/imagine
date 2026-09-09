@@ -110,7 +110,14 @@ object Engine {
 
         val outBytes = processImage(rgba, w, h) ?: return null
 
-        val scale = outBytes.size / (w * h * 4)
+        // output size = (w*scale) * (h*scale) * 4  =>  scale = sqrt(size / (w*h*4))
+        val rawScale = outBytes.size.toDouble() / (w * h * 4)
+        val scale = kotlin.math.round(kotlin.math.sqrt(rawScale)).toInt()
+        if (scale < 2 || w * scale * h * scale * 4L != outBytes.size.toLong()) {
+            Log.e(TAG, "Unexpected output size: ${outBytes.size} for ${w}x${h} (derived scale=$scale)")
+            return null
+        }
+
         val outBitmap = Bitmap.createBitmap(w * scale, h * scale, Bitmap.Config.ARGB_8888)
         outBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(outBytes))
         return outBitmap

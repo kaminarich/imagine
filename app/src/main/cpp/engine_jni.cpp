@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <cstdint>
 #include <android/log.h>
 
 #include "realesrgan.h"
@@ -15,13 +16,6 @@
 
 static RealESRGAN* g_realesrgan = nullptr;
 static bool g_gpu_init = false;
-static int g_scale = 4;
-static int g_out_width = 0;
-static int g_out_height = 0;
-static int g_channels = 3;
-
-static unsigned char* g_outputBuf = nullptr;
-static size_t g_outputBufSize = 0;
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     JNIEnv* env;
@@ -98,7 +92,6 @@ Java_com_kaminari_imagine_Engine_loadModel(JNIEnv* env, jobject thiz,
         g_realesrgan = nullptr;
         return JNI_FALSE;
     }
-    g_scale = scale;
     LOGI("Model ready: scale=%d, tilesize=%d, prepadding=%d", scale, tile, prepadding);
     return JNI_TRUE;
 }
@@ -125,9 +118,16 @@ Java_com_kaminari_imagine_Engine_processImage(JNIEnv* env, jobject thiz,
     }
 
     const int scale = g_realesrgan->scale;
-    const int outW = width * scale;
-    const int outH = height * scale;
-    const size_t outSize = (size_t)outW * outH * 4;
+    const int64_t outW64 = (int64_t)width * scale;
+    const int64_t outH64 = (int64_t)height * scale;
+    const int64_t outSize64 = outW64 * outH64 * 4;
+    if (outW64 > 32767 || outH64 > 32767 || outSize64 > INT32_MAX) {
+        LOGE("Output too large: %lld", (long long)outSize64);
+        return nullptr;
+    }
+    const int outW = (int)outW64;
+    const int outH = (int)outH64;
+    const jsize outSize = (jsize)outSize64;
 
     // Build input/output exactly like upstream main.cpp:
     //   inimage  = Mat(w, h, (void*)data, (size_t)c, c)
@@ -146,15 +146,12 @@ Java_com_kaminari_imagine_Engine_processImage(JNIEnv* env, jobject thiz,
         return nullptr;
     }
 
-    jbyteArray result = env->NewByteArray((jsize)outSize);
+    jbyteArray result = env->NewByteArray(outSize);
     if (!result) {
-        LOGE("Cannot allocate output array of %zu bytes", outSize);
+        LOGE("Cannot allocate output array of %d bytes", (int)outSize);
         return nullptr;
     }
-    env->SetByteArrayRegion(result, 0, (jsize)outSize, (const jbyte*)outimage.data);
-    g_out_width = outW;
-    g_out_height = outH;
-    g_channels = 4;
+    env->SetByteArrayRegion(result, 0, outSize, (const jbyte*)outimage.data);
     return result;
 }
 
@@ -164,11 +161,6 @@ Java_com_kaminari_imagine_Engine_destroy(JNIEnv* env, jobject thiz) {
     if (g_realesrgan) {
         delete g_realesrgan;
         g_realesrgan = nullptr;
-    }
-    if (g_outputBuf) {
-        free(g_outputBuf);
-        g_outputBuf = nullptr;
-        g_outputBufSize = 0;
     }
     if (g_gpu_init) {
         ncnn::destroy_gpu_instance();
