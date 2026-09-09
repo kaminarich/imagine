@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Light pastel skeuomorphic palette -->
+    <color name="skeu_bg">#FFFDF6F0</color>
+    <color name="skeu_bg_dark">#FF2B2622</color>
+    <color name="skeu_surface">#FFFFFBF7</color>
+    <color name="skeu_shadow_dark">#FFE8D9CE</color>
+    <color name="skeu_shadow_light">#FFFFFFFF</color>
+    <color name="skeu_accent">#FFB5A6D6</color>
+    <color name="skeu_accent_pressed">#FF9C89C4</color>
+    <color name="skeu_text">#FF5C5470</color>
+    <color name="skeu_text_secondary">#FF9A91A8</color>
+    <color name="pastel_pink">#FFF7D6E0</color>
+    <color name="pastel_blue">#FFD6E4F7</color>
+    <color name="pastel_mint">#FFD9F2E6</color>
+    <color name="pastel_yellow">#FFFDF3D7</color>
+    <color name="pastel_lavender">#FFE9E1F5</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

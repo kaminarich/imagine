@@ -1,0 +1,72 @@
+name: Android CI
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  NCNN_VERSION: "20260526"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK, CMake and glslang
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1" > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq glslang-tools
+
+      - name: Download ncnn Android Vulkan shared libs
+        run: |
+          mkdir -p app/ncnn-android
+          wget -q "https://github.com/Tencent/ncnn/releases/download/${{ env.NCNN_VERSION }}/ncnn-${{ env.NCNN_VERSION }}-android-vulkan-shared.zip" -O /tmp/ncnn.zip
+          unzip -q /tmp/ncnn.zip -d /tmp/ncnn
+          # zip layout: ncnn-<ver>-android-vulkan-shared/<abi>/lib/libncnn.so
+          for abi in arm64-v8a armeabi-v7a; do
+            mkdir -p "app/ncnn-android/$abi/lib"
+            cp -r "/tmp/ncnn/ncnn-${{ env.NCNN_VERSION }}-android-vulkan-shared/$abi/include" "app/ncnn-android/$abi/" || true
+            cp "/tmp/ncnn/ncnn-${{ env.NCNN_VERSION }}-android-vulkan-shared/$abi/lib/libncnn.so" "app/ncnn-android/$abi/lib/"
+          done
+          find app/ncnn-android -name "*.so" -o -name "net.h" | head
+          rm -rf /tmp/ncnn /tmp/ncnn.zip
+
+      - name: Download Real-ESRGAN ncnn models
+        run: |
+          mkdir -p app/src/main/assets/models
+          # Verified: v0.2.5.0 ubuntu release zip bundles models/ with .param/.bin files
+          wget -q "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip" -O /tmp/models.zip
+          unzip -j -o /tmp/models.zip "models/*" -d app/src/main/assets/models/
+          ls -la app/src/main/assets/models/
+          rm /tmp/models.zip
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --stacktrace --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagine-release
+          path: app/build/outputs/apk/release/app-release.apk
+          retention-days: 30

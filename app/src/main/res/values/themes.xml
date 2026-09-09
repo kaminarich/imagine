@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Imagine" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/skeu_bg</item>
+        <item name="android:navigationBarColor">@color/skeu_bg</item>
+        <item name="android:windowBackground">@color/skeu_bg</item>
+    </style>
+</resources>
