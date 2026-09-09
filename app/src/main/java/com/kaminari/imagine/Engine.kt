@@ -128,6 +128,13 @@ object Engine {
         val w = bitmap.width
         val h = bitmap.height
 
+        // refuse inputs whose upscaled result would exceed ~256MB
+        // (native side allocates w*h*4 in, w*h*scale^2*4 out)
+        if (w.toLong() * h * 4 > 256L * 1024 * 1024) {
+            Log.e(TAG, "Input too large: $w x $h")
+            return null
+        }
+
         // ARGB_8888 bitmaps copy out as RGBA bytes via copyPixelsToBuffer
         val rgba = ByteArray(w * h * 4)
         bitmap.copyPixelsToBuffer(ByteBuffer.wrap(rgba))

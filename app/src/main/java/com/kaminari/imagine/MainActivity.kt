@@ -145,7 +145,9 @@ class MainActivity : ComponentActivity() {
             uri?.let {
                 val bitmap = try {
                     contentResolver.openInputStream(it)?.use { stream ->
-                        decodeSampled(stream, 3072)
+                        // cap the input so the x4 result stays within memory
+                        // and canvas limits (2048*4 = 8192px max edge)
+                        decodeSampled(stream, 2048)
                     }
                 } catch (e: Exception) { null }
                 if (bitmap != null) {
@@ -324,7 +326,11 @@ class MainActivity : ComponentActivity() {
                         showCompare = true
                     } else {
                         withContext(Dispatchers.Main) {
-                            Toast.makeText(context, "Enhancement failed (GPU OOM?)", Toast.LENGTH_LONG).show()
+                            Toast.makeText(
+                                context,
+                                "Enhancement failed — image too large for this model. Try a smaller input or ×2.",
+                                Toast.LENGTH_LONG
+                            ).show()
                         }
                     }
                 }
@@ -349,6 +355,10 @@ class MainActivity : ComponentActivity() {
         val tw = m.groupValues[1].toIntOrNull() ?: return src
         val th = m.groupValues[2].toIntOrNull() ?: return src
         if (tw <= 0 || th <= 0 || (tw == src.width && th == src.height)) return src
+        // refuse targets that would exceed ~256MB (OOM + canvas limit)
+        if (tw.toLong() * th * 4 > 256L * 1024 * 1024) {
+            return src
+        }
         return Bitmap.createScaledBitmap(src, tw, th, true)
     }
 
@@ -429,6 +439,32 @@ class MainActivity : ComponentActivity() {
 }
 
 // ── UI Components ──
+
+/**
+ * Hardware canvases refuse to record bitmaps larger than ~100MB into a
+ * display list ("Canvas: trying to draw too large bitmap"). 4x upscales of
+ * big photos blow past that, so the UI draws a downscaled *display copy*
+ * while the full-resolution bitmap is kept for saving.
+ */
+private const val MAX_DISPLAY_EDGE = 4096
+
+@Composable
+private fun rememberDisplayBitmap(bitmap: Bitmap): Bitmap {
+    val longest = maxOf(bitmap.width, bitmap.height)
+    return remember(bitmap) {
+        if (longest <= MAX_DISPLAY_EDGE) {
+            bitmap
+        } else {
+            val ratio = MAX_DISPLAY_EDGE.toFloat() / longest
+            Bitmap.createScaledBitmap(
+                bitmap,
+                (bitmap.width * ratio).toInt().coerceAtLeast(1),
+                (bitmap.height * ratio).toInt().coerceAtLeast(1),
+                true
+            )
+        }
+    }
+}
 
 @Composable
 private fun HeaderSection(gpuReady: Boolean, gpuName: String, useCloud: Boolean, onToggle: (Boolean) -> Unit) {
@@ -575,6 +611,7 @@ private fun PreviewSection(
     isEnhanced: Boolean
 ) {
     val aspectRatio = bitmap.width.toFloat() / bitmap.height
+    val displayBitmap = rememberDisplayBitmap(bitmap)
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -592,7 +629,7 @@ private fun PreviewSection(
         contentAlignment = Alignment.Center
     ) {
         Image(
-            bitmap = bitmap.asImageBitmap(),
+            bitmap = displayBitmap.asImageBitmap(),
             contentDescription = if (isEnhanced) "Enhanced" else "Selected",
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Fit
@@ -720,6 +757,8 @@ private fun ComparisonSection(
 ) {
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
     val aspectRatio = before.width.toFloat() / before.height
+    val displayBefore = rememberDisplayBitmap(before)
+    val displayAfter = rememberDisplayBitmap(after)
 
     Box(
         modifier = Modifier
@@ -752,7 +791,7 @@ private fun ComparisonSection(
     ) {
         // After image (full)
         Image(
-            bitmap = after.asImageBitmap(),
+            bitmap = displayAfter.asImageBitmap(),
             contentDescription = "Enhanced",
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Fit
@@ -771,7 +810,7 @@ private fun ComparisonSection(
                     }
             ) {
                 Image(
-                    bitmap = before.asImageBitmap(),
+                    bitmap = displayBefore.asImageBitmap(),
                     contentDescription = "Original",
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit
