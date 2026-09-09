@@ -20,13 +20,11 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -37,13 +35,11 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -56,9 +52,26 @@ import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import kotlinx.coroutines.Dispatchers
-import kotlin.math.sin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.sin
+
+// ── Design tokens ──────────────────────────────────────────────────────────
+
+// Single brand palette: lavender primary, warm neutrals, WCAG-AA text
+private val Brand = Color(0xFF8B7CC7)          // primary action
+private val BrandDark = Color(0xFF6E5FB1)      // pressed/gradient end
+private val BrandContainer = Color(0xFFE9E1F5)
+private val OnBrand = Color(0xFFFFFFFF)
+private val Bg = Color(0xFFFDF6F0)             // app background
+private val SurfaceFlat = Color(0xFFFFFFFF)    // control card surface
+private val SurfaceInset = Color(0xFFF1EAE3)   // recessed wells (chips, fields)
+private val BorderSubtle = Color(0xFFE3D9CF)
+private val TextPrimary = Color(0xFF3D362E)    // high contrast body
+private val TextSecondary = Color(0xFF6B6259)  // AA-compliant secondary
+private val TextOnBrand = Color(0xFFFFFFFF)
+
+// ── Activity ───────────────────────────────────────────────────────────────
 
 class MainActivity : ComponentActivity() {
 
@@ -75,6 +88,7 @@ class MainActivity : ComponentActivity() {
     private var sliderPosition by mutableFloatStateOf(0.5f)
     private var scaleMultiplier by mutableIntStateOf(4)
     private var targetResolution by mutableStateOf("")
+    private var useCustomResolution by mutableStateOf(false)
     private var cloudApiKey by mutableStateOf("")
     private var enhanceProgress by mutableFloatStateOf(0f)
     private var crashReporter: CrashReporter? = null
@@ -96,7 +110,7 @@ class MainActivity : ComponentActivity() {
             try {
                 engineReady = Engine.init(this@MainActivity)
                 if (engineReady) {
-                    gpuName = "Vulkan GPU (${Engine.gpuCount()} device(s))"
+                    gpuName = "Vulkan"
                 } else {
                     CrashReporter.log(this@MainActivity, "Engine", "GPU init failed (no Vulkan or native lib missing)")
                 }
@@ -110,18 +124,17 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme(
                 colorScheme = lightColorScheme(
-                    primary = Color(0xFFB5A6D6),
-                    onPrimary = Color.White,
-                    primaryContainer = Color(0xFFE9E1F5),
-                    surface = Color(0xFFFDF6F0),
-                    onSurface = Color(0xFF5C5470),
-                    background = Color(0xFFFDF6F0),
-                    onBackground = Color(0xFF5C5470),
-                    surfaceVariant = Color(0xFFFFFBF7),
-                    onSurfaceVariant = Color(0xFF9A91A8),
-                    outline = Color(0xFFE8D9CE),
-                    secondary = Color(0xFFF7D6E0),
-                    tertiary = Color(0xFFD6E4F7),
+                    primary = Brand,
+                    onPrimary = OnBrand,
+                    primaryContainer = BrandContainer,
+                    onPrimaryContainer = TextPrimary,
+                    surface = Bg,
+                    onSurface = TextPrimary,
+                    background = Bg,
+                    onBackground = TextPrimary,
+                    surfaceVariant = SurfaceInset,
+                    onSurfaceVariant = TextSecondary,
+                    outline = BorderSubtle,
                 )
             ) {
                 Surface(
@@ -154,10 +167,16 @@ class MainActivity : ComponentActivity() {
                     selectedBitmap = bitmap
                     enhancedBitmap = null
                     showCompare = false
+                    SelectedBitmapHolder.w = bitmap.width
+                    SelectedBitmapHolder.h = bitmap.height
                 } else {
                     Toast.makeText(context, "Cannot load image", Toast.LENGTH_SHORT).show()
                 }
             }
+        }
+
+        val pickImage: () -> Unit = {
+            imagePicker.launch("image/*")
         }
 
         val storagePermission = if (android.os.Build.VERSION.SDK_INT >= 33) {
@@ -170,47 +189,49 @@ class MainActivity : ComponentActivity() {
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(horizontal = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Header
-            HeaderSection(engineReady, gpuName, useCloud, { useCloud = it })
+            // ── Compact header: single row ──
+            CompactHeader(
+                useCloud = useCloud,
+                gpuReady = engineReady,
+                onEngineChange = { useCloud = it }
+            )
 
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(12.dp))
 
-            // Image area — aspect ratio follows the image itself
+            // ── Preview canvas ──
             if (selectedBitmap == null) {
-                EmptyStateSection {
-                    if (storagePermission.status.isGranted) {
-                        imagePicker.launch("image/*")
-                    } else {
-                        storagePermission.launchPermissionRequest()
-                    }
-                }
-            } else if (showCompare && enhancedBitmap != null) {
-                ComparisonSection(
+                EmptyStateSection(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                    onPick = pickImage
+                )
+            } else if (enhancedBitmap != null && showCompare) {
+                CompareCanvas(
                     before = selectedBitmap!!,
                     after = enhancedBitmap!!,
                     sliderPosition = sliderPosition,
-                    onSliderChange = { sliderPosition = it }
+                    onSliderChange = { sliderPosition = it },
+                    modifier = Modifier.fillMaxWidth()
                 )
             } else {
-                PreviewSection(
+                PreviewCanvas(
                     bitmap = enhancedBitmap ?: selectedBitmap!!,
                     isProcessing = isProcessing,
                     processingStatus = processingStatus,
                     progress = enhanceProgress,
-                    isEnhanced = enhancedBitmap != null
+                    isEnhanced = enhancedBitmap != null,
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
 
             Spacer(Modifier.height(16.dp))
 
-            // Model selector
+            // ── Controls ──
             if (selectedBitmap != null) {
                 if (useCloud) {
-                    CloudModelSelector(
-                        models = CloudEngine.CLOUD_MODELS,
+                    CloudPanel(
                         selected = selectedCloudModel,
                         onSelect = { selectedCloudModel = it },
                         apiKey = cloudApiKey,
@@ -218,64 +239,61 @@ class MainActivity : ComponentActivity() {
                             cloudApiKey = it
                             getPreferences(MODE_PRIVATE).edit()
                                 .putString("replicate_api_key", it.trim()).apply()
-                        }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    CloudScalePanel(
+                        scale = scaleMultiplier,
+                        onScaleChange = { scaleMultiplier = it },
+                        modifier = Modifier.fillMaxWidth()
                     )
                 } else {
-                    ModelSelector(
-                        models = Engine.MODELS,
+                    DevicePanel(
                         selected = selectedModel,
-                        onSelect = { selectedModel = it }
+                        onSelect = { selectedModel = it },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    DeviceScalePanel(
+                        selected = selectedModel,
+                        useCustom = useCustomResolution,
+                        onUseCustomChange = { useCustomResolution = it },
+                        resolution = targetResolution,
+                        onResolutionChange = { targetResolution = it },
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(14.dp))
 
-                // Scale options (multiplier only meaningful for cloud models;
-                // on-device models carry their own native scale)
-                ScaleOptions(
-                    scale = scaleMultiplier,
-                    onScaleChange = { scaleMultiplier = it },
-                    resolution = targetResolution,
-                    onResolutionChange = { targetResolution = it },
-                    showMultiplier = useCloud
-                )
-
-                Spacer(Modifier.height(12.dp))
-
-                // Action buttons
-                ActionButtons(
+                // ── CTA flow ──
+                ActionFlow(
                     isProcessing = isProcessing,
                     hasResult = enhancedBitmap != null,
-                    showCompare = showCompare,
                     onEnhance = {
                         if (useCloud) {
                             if (cloudApiKey.isBlank()) {
-                                Toast.makeText(context, "Cloud mode needs a Replicate API token. Enter it above.", Toast.LENGTH_LONG).show()
-                                return@ActionButtons
+                                Toast.makeText(context, "Cloud mode needs a Replicate API token.", Toast.LENGTH_LONG).show()
+                                return@ActionFlow
                             }
                         } else if (!engineReady) {
                             Toast.makeText(context, "GPU not available. Try cloud mode.", Toast.LENGTH_LONG).show()
-                            return@ActionButtons
+                            return@ActionFlow
                         }
-                        scope.launch {
-                            processImage(context)
-                        }
+                        scope.launch { processImage(context) }
                     },
-                    onCompare = { showCompare = !showCompare },
+                    onRepick = pickImage,
                     onSave = {
                         enhancedBitmap?.let { bmp ->
                             scope.launch { saveImage(bmp, context) }
                         }
                     },
-                    onRepick = {
-                        if (storagePermission.status.isGranted) {
-                            imagePicker.launch("image/*")
-                        } else {
-                            storagePermission.launchPermissionRequest()
-                        }
-                    }
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
+
+            Spacer(Modifier.height(24.dp))
         }
     }
 
@@ -305,7 +323,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 } else {
-                    processingStatus = "Loading model..."
+                    processingStatus = "Loading model…"
                     val loaded = Engine.load(context, selectedModel)
                     if (!loaded) {
                         withContext(Dispatchers.Main) {
@@ -313,7 +331,7 @@ class MainActivity : ComponentActivity() {
                         }
                         return@withContext
                     }
-                    processingStatus = "Enhancing on GPU..."
+                    processingStatus = "Enhancing…"
                     val result = Engine.process(bitmap) { fraction ->
                         enhanceProgress = fraction
                         processingStatus = "Enhancing… ${(fraction * 100).toInt()}%"
@@ -328,7 +346,7 @@ class MainActivity : ComponentActivity() {
                         withContext(Dispatchers.Main) {
                             Toast.makeText(
                                 context,
-                                "Enhancement failed — image too large for this model. Try a smaller input or ×2.",
+                                "Enhancement failed — image too large for this model. Try a smaller input.",
                                 Toast.LENGTH_LONG
                             ).show()
                         }
@@ -350,7 +368,7 @@ class MainActivity : ComponentActivity() {
     /** If a target resolution like 1920x1080 is set, scale the result to it. */
     private fun applyTargetResolution(src: Bitmap): Bitmap {
         val target = targetResolution.trim()
-        if (target.isBlank()) return src
+        if (target.isBlank() || !useCustomResolution) return src
         val m = Regex("(\\d+)\\s*[xX×]\\s*(\\d+)").find(target) ?: return src
         val tw = m.groupValues[1].toIntOrNull() ?: return src
         val th = m.groupValues[2].toIntOrNull() ?: return src
@@ -364,9 +382,8 @@ class MainActivity : ComponentActivity() {
 
     /** Decode a stream to a bitmap no larger than [maxDim], sampling first to avoid OOM. */
     private fun decodeSampled(stream: java.io.InputStream, maxDim: Int): Bitmap? {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        // count single pass for bounds
         val bytes = stream.readBytes()
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1
         while (bounds.outWidth / sample > maxDim * 2 || bounds.outHeight / sample > maxDim * 2) {
@@ -374,7 +391,6 @@ class MainActivity : ComponentActivity() {
         }
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
         var bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return null
-        // final exact cap
         val longest = maxOf(bmp.width, bmp.height)
         if (longest > maxDim) {
             val ratio = maxDim.toFloat() / longest
@@ -392,8 +408,6 @@ class MainActivity : ComponentActivity() {
     private suspend fun saveImage(bitmap: Bitmap, context: android.content.Context) {
         withContext(Dispatchers.IO) {
             try {
-                // very large bitmaps: drop to JPEG-95 to bound encode time/memory.
-                // PNG of a 4x upscale can exceed 100 MB and trigger OOM/ANR.
                 val format = if (bitmap.byteCount > 64 * 1024 * 1024) {
                     Bitmap.CompressFormat.JPEG
                 } else {
@@ -438,13 +452,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// ── UI Components ──
+// ── Display-size guard ─────────────────────────────────────────────────────
 
 /**
  * Hardware canvases refuse to record bitmaps larger than ~100MB into a
- * display list ("Canvas: trying to draw too large bitmap"). 4x upscales of
- * big photos blow past that, so the UI draws a downscaled *display copy*
- * while the full-resolution bitmap is kept for saving.
+ * display list. The UI draws a downscaled *display copy* while the
+ * full-resolution bitmap is kept for saving.
  */
 private const val MAX_DISPLAY_EDGE = 4096
 
@@ -466,200 +479,201 @@ private fun rememberDisplayBitmap(bitmap: Bitmap): Bitmap {
     }
 }
 
+// ── Header ─────────────────────────────────────────────────────────────────
+
+/** One-line header: title, engine toggle, GPU badge. */
 @Composable
-private fun HeaderSection(gpuReady: Boolean, gpuName: String, useCloud: Boolean, onToggle: (Boolean) -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = Alignment.CenterHorizontally
+private fun CompactHeader(
+    useCloud: Boolean,
+    gpuReady: Boolean,
+    onEngineChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             "Imagine",
-            fontSize = 32.sp,
+            fontSize = 22.sp,
             fontWeight = FontWeight.Bold,
-            color = Color(0xFF5C5470),
+            color = TextPrimary,
             fontFamily = FontFamily.Serif
         )
 
-        Text(
-            "AI Image Enhancer",
-            fontSize = 14.sp,
-            color = Color(0xFF9A91A8),
-            fontFamily = FontFamily.Serif
-        )
+        Spacer(Modifier.weight(1f))
 
-        Spacer(Modifier.height(8.dp))
-
-        // Engine toggle
+        // Segmented engine toggle
         Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(20.dp))
-                .background(
-                    Brush.horizontalGradient(
-                        listOf(Color(0xFFE9E1F5), Color(0xFFF7D6E0))
-                    ),
-                    RoundedCornerShape(20.dp)
-                )
-                .padding(2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(0.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(SurfaceInset)
+                .padding(2.dp)
         ) {
-            EngineToggleChip("On-Device GPU", !useCloud, gpuReady) {
-                onToggle(false)
-            }
-            EngineToggleChip("Cloud AI", useCloud, true) {
-                onToggle(true)
-            }
-        }
-
-        if (gpuReady && !useCloud) {
-            Text(
-                "GPU: Vulkan",
-                fontSize = 11.sp,
-                color = Color(0xFF9A91A8),
-                modifier = Modifier.padding(top = 4.dp)
-            )
+            HeaderSegment("Device", !useCloud, enabled = gpuReady) { onEngineChange(false) }
+            HeaderSegment("Cloud", useCloud, enabled = true) { onEngineChange(true) }
         }
     }
 }
 
 @Composable
-private fun EngineToggleChip(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+private fun HeaderSegment(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(18.dp))
-            .then(
-                if (selected) {
-                    Modifier
-                        .shadow(2.dp, RoundedCornerShape(18.dp))
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(Color(0xFFB5A6D6), Color(0xFFC4B5E6))
-                            ),
-                            RoundedCornerShape(18.dp)
-                        )
-                } else Modifier
-            )
-            .clickable(enabled) { onClick() }
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        contentAlignment = Alignment.Center
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (selected) Brand else androidx.compose.ui.graphics.Color.Transparent)
+            .clickable(enabled = enabled) { onClick() }
+            .padding(horizontal = 14.dp, vertical = 6.dp)
     ) {
         Text(
             label,
             fontSize = 13.sp,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-            color = if (selected) Color.White else Color(0xFF9A91A8),
-            fontFamily = FontFamily.Default
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            // AA contrast: unselected uses dark text on light well, selected white on brand
+            color = if (selected) TextOnBrand else TextSecondary
         )
     }
 }
 
+// ── Empty state ────────────────────────────────────────────────────────────
+
 @Composable
-private fun EmptyStateSection(onPick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(300.dp)
-            .shadow(12.dp, RoundedCornerShape(28.dp))
-            .background(
-                Brush.linearGradient(
-                    listOf(Color(0xFFFFFBF7), Color(0xFFFDF6F0))
-                ),
-                RoundedCornerShape(28.dp)
-            )
-            .border(
-                1.dp,
-                Brush.horizontalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFE8D9CE))),
-                RoundedCornerShape(28.dp)
-            )
-            .clickable { onPick() },
-        contentAlignment = Alignment.Center
+private fun EmptyStateSection(modifier: Modifier = Modifier, onPick: () -> Unit) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(32.dp)
+        Box(
+            modifier = Modifier
+                .size(96.dp)
+                .shadow(4.dp, RoundedCornerShape(28.dp))
+                .clip(RoundedCornerShape(28.dp))
+                .background(BrandContainer),
+            contentAlignment = Alignment.Center
         ) {
-            Text(
-                "✦",
-                fontSize = 48.sp,
-                color = Color(0xFFB5A6D6)
-            )
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "Choose an image to enhance",
-                fontSize = 18.sp,
-                color = Color(0xFF5C5470),
-                fontFamily = FontFamily.Serif,
-                fontWeight = FontWeight.Medium
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Real-ESRGAN • GFPGAN • CodeFormer",
-                fontSize = 12.sp,
-                color = Color(0xFF9A91A8),
-                fontFamily = FontFamily.Default
-            )
+            Text("✦", fontSize = 40.sp, color = BrandDark)
         }
+        Spacer(Modifier.height(18.dp))
+        Text(
+            "Enhance any photo with Real-ESRGAN",
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = TextPrimary,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "On-device GPU · offline · private",
+            fontSize = 13.sp,
+            color = TextSecondary,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(20.dp))
+        PrimaryButton("Choose Image", onClick = onPick, modifier = Modifier.fillMaxWidth(0.7f))
     }
 }
 
+// ── Preview canvas with zoom ───────────────────────────────────────────────
+
+/**
+ * Preview image with Fit/1:1 zoom toggle (double-tap or pinch)
+ * and the water-fill progress overlay while processing.
+ */
 @Composable
-private fun PreviewSection(
+private fun PreviewCanvas(
     bitmap: Bitmap,
     isProcessing: Boolean,
     processingStatus: String,
     progress: Float,
-    isEnhanced: Boolean
+    isEnhanced: Boolean,
+    modifier: Modifier = Modifier
 ) {
-    val aspectRatio = bitmap.width.toFloat() / bitmap.height
     val displayBitmap = rememberDisplayBitmap(bitmap)
+    val aspectRatio = bitmap.width.toFloat() / bitmap.height
+    var zoomed by remember { mutableStateOf(false) }
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            // the frame hugs the image's own aspect ratio (capped so tall
-            // images don't eat the whole screen)
+        modifier = modifier
             .aspectRatio(aspectRatio.coerceIn(0.55f, 1.9f))
-            .shadow(12.dp, RoundedCornerShape(28.dp))
-            .clip(RoundedCornerShape(28.dp))
+            .shadow(6.dp, RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(20.dp))
             .background(Color(0xFFEFEBE6))
-            .border(
-                1.dp,
-                Brush.horizontalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFE8D9CE))),
-                RoundedCornerShape(28.dp)
-            ),
-        contentAlignment = Alignment.Center
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onDoubleTap = { zoomed = !zoomed }
+                )
+            }
+            .pointerInput(bitmap) {
+                detectTransformGestures { _, pan, gestureZoom, _ ->
+                    if (gestureZoom != 1f) {
+                        zoomed = true
+                        scale = (scale * gestureZoom).coerceIn(1f, 6f)
+                    }
+                    if (zoomed) offset += pan
+                }
+            }
     ) {
         Image(
             bitmap = displayBitmap.asImageBitmap(),
             contentDescription = if (isEnhanced) "Enhanced" else "Selected",
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Fit
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = if (zoomed) scale else 1f
+                    scaleY = if (zoomed) scale else 1f
+                    translationX = offset.x
+                    translationY = offset.y
+                },
+            contentScale = if (zoomed) ContentScale.Crop else ContentScale.Fit
         )
 
-        // Water-fill progress: liquid rises from the bottom with animated waves
         if (isProcessing) {
             WaterFillProgress(
                 progress = progress,
                 status = processingStatus,
                 modifier = Modifier.fillMaxSize()
             )
-        }
+        } else {
+            // result badge (small, corner)
+            Box(Modifier.align(Alignment.BottomStart).padding(8.dp)) {
+                Text(
+                    if (isEnhanced) "ENHANCED" else "ORIGINAL",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp,
+                    color = Color.White,
+                    modifier = Modifier
+                        .background(Color(0xB3000000), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                )
+            }
 
-        if (isEnhanced && !isProcessing) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(8.dp)
-            ) {
-                Label("ENHANCED", Color(0xFFD9F2E6))
+            // zoom hint
+            if (!zoomed) {
+                Text(
+                    "Double-tap for 100%",
+                    fontSize = 11.sp,
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(8.dp)
+                        .background(Color(0x88000000), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                )
             }
         }
     }
 }
 
+// ── Water-fill progress ────────────────────────────────────────────────────
+
 /**
  * Liquid progress overlay: the area below the water line is tinted,
  * the surface is two sine waves drifting horizontally, and the fill
- * height tracks [progress] (0..1). A status line floats above the water.
+ * height tracks [progress] (0..1).
  */
 @Composable
 private fun WaterFillProgress(
@@ -667,7 +681,6 @@ private fun WaterFillProgress(
     status: String,
     modifier: Modifier = Modifier
 ) {
-    // two phases so the waves feel alive
     val transition = rememberInfiniteTransition(label = "water")
     val phase by transition.animateFloat(
         initialValue = 0f,
@@ -679,7 +692,7 @@ private fun WaterFillProgress(
         label = "phase"
     )
 
-    val fillFraction = (progress.coerceIn(0f, 1f))
+    val fillFraction = progress.coerceIn(0f, 1f)
 
     Box(modifier) {
         Canvas(modifier = Modifier.fillMaxSize()) {
@@ -687,7 +700,6 @@ private fun WaterFillProgress(
             val h = size.height
             val waterY = h * (1f - fillFraction)
 
-            // wave geometry: front wave big, back wave small and offset
             fun wavePath(amplitude: Float, wavelength: Float, phaseShift: Float): Path {
                 val path = Path()
                 path.moveTo(0f, h)
@@ -702,44 +714,39 @@ private fun WaterFillProgress(
                 return path
             }
 
-            // back wave (lighter, translucent)
             drawPath(
                 path = wavePath(amplitude = 10f, wavelength = 260f, phaseShift = 1.2f),
-                color = Color(0xFFB5A6D6).copy(alpha = 0.25f)
+                color = Brand.copy(alpha = 0.25f)
             )
-            // front wave (stronger tint)
             drawPath(
                 path = wavePath(amplitude = 16f, wavelength = 180f, phaseShift = 0f),
-                color = Color(0xFFB5A6D6).copy(alpha = 0.45f)
+                color = Brand.copy(alpha = 0.45f)
             )
-            // crisp water line
             drawLine(
-                color = Color(0xFF9C89C4).copy(alpha = 0.8f),
+                color = BrandDark.copy(alpha = 0.8f),
                 start = Offset(0f, waterY),
                 end = Offset(w, waterY),
                 strokeWidth = 2f
             )
         }
 
-        // status text floats above the water line
         Text(
             text = if (status.isNotBlank()) status else "Enhancing…",
-            fontSize = 14.sp,
+            fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
-            color = Color(0xFF5C5470),
+            color = TextPrimary,
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 12.dp)
+                .padding(top = 10.dp)
                 .background(Color(0xCCFDF6F0), RoundedCornerShape(10.dp))
                 .padding(horizontal = 12.dp, vertical = 4.dp)
         )
 
-        // percentage badge
         Text(
             text = "${(fillFraction * 100).toInt()}%",
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold,
-            color = Color(0xFF5C5470),
+            color = TextPrimary,
             modifier = Modifier
                 .align(Alignment.Center)
                 .background(Color(0xCCFDF6F0), RoundedCornerShape(12.dp))
@@ -748,58 +755,74 @@ private fun WaterFillProgress(
     }
 }
 
+// ── Comparison canvas ──────────────────────────────────────────────────────
+
+/**
+ * Minimal split-slider comparison: after image fills the frame, the before
+ * image is clipped left of the divider. A slim line + circular handle marks
+ * the split; BEFORE/AFTER badges appear only while actively dragging.
+ * Double-tap toggles 1:1 zoom for pixel peeping.
+ */
 @Composable
-private fun ComparisonSection(
+private fun CompareCanvas(
     before: Bitmap,
     after: Bitmap,
     sliderPosition: Float,
-    onSliderChange: (Float) -> Unit
+    onSliderChange: (Float) -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    var containerSize by remember { mutableStateOf(IntSize.Zero) }
-    val aspectRatio = before.width.toFloat() / before.height
     val displayBefore = rememberDisplayBitmap(before)
     val displayAfter = rememberDisplayBitmap(after)
+    var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    var isDragging by remember { mutableStateOf(false) }
+    val aspectRatio = before.width.toFloat() / before.height
+    var zoomed by remember { mutableStateOf(false) }
 
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            // frame matches the image aspect ratio (capped for extreme shapes)
+        modifier = modifier
             .aspectRatio(aspectRatio.coerceIn(0.55f, 1.9f))
-            .shadow(12.dp, RoundedCornerShape(28.dp))
-            .clip(RoundedCornerShape(28.dp))
+            .shadow(6.dp, RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(20.dp))
             .background(Color(0xFFEFEBE6))
-            .border(
-                1.dp,
-                Brush.horizontalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFE8D9CE))),
-                RoundedCornerShape(28.dp)
-            )
             .onGloballyPositioned { containerSize = it.size }
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onDoubleTap = { zoomed = !zoomed }
+                )
+            }
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
+                    isDragging = true
                     if (containerSize.width > 0) {
                         onSliderChange((down.position.x / containerSize.width).coerceIn(0.02f, 0.98f))
                     }
-                    drag(down.id) { change ->
-                        if (containerSize.width > 0) {
-                            onSliderChange((change.position.x / containerSize.width).coerceIn(0.02f, 0.98f))
+                    try {
+                        drag(down.id) { change ->
+                            if (containerSize.width > 0) {
+                                onSliderChange((change.position.x / containerSize.width).coerceIn(0.02f, 0.98f))
+                            }
+                            change.consume()
                         }
-                        change.consume()
+                    } finally {
+                        isDragging = false
                     }
                 }
             }
     ) {
-        // After image (full)
+        val contentScale = if (zoomed) ContentScale.Crop else ContentScale.Fit
+
+        // after (full frame)
         Image(
             bitmap = displayAfter.asImageBitmap(),
             contentDescription = "Enhanced",
             modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Fit
+            contentScale = contentScale
         )
 
-        // Before image (clipped)
+        // before (clipped left of the split)
         if (containerSize.width > 0) {
-            val clipWidth = (containerSize.width * sliderPosition).toFloat()
+            val clipWidth = containerSize.width * sliderPosition
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -813,178 +836,394 @@ private fun ComparisonSection(
                     bitmap = displayBefore.asImageBitmap(),
                     contentDescription = "Original",
                     modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Fit
+                    contentScale = contentScale
                 )
             }
 
-            // Slider line
-            Canvas(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(start = with(LocalDensity.current) { clipWidth.toDp() })
-            ) {
+            // divider + handle (minimal)
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val x = size.width * sliderPosition
+                // slim line
                 drawLine(
                     color = Color.White,
-                    start = Offset(0f, 0f),
-                    end = Offset(0f, size.height),
-                    strokeWidth = 3f
+                    start = Offset(x, 0f),
+                    end = Offset(x, size.height),
+                    strokeWidth = 4f
                 )
-                // Handle
-                drawCircle(
-                    color = Color.White,
-                    radius = 16f,
-                    center = Offset(0f, size.height / 2)
+                drawLine(
+                    color = BrandDark.copy(alpha = 0.6f),
+                    start = Offset(x + 4f, 0f),
+                    end = Offset(x + 4f, size.height),
+                    strokeWidth = 1.5f
                 )
-                drawCircle(
-                    color = Color(0xFFB5A6D6),
-                    radius = 12f,
-                    center = Offset(0f, size.height / 2),
-                    style = Stroke(width = 2f)
+                // circular drag handle
+                val cy = size.height / 2
+                drawCircle(Color.White, radius = 22f, center = Offset(x, cy))
+                drawCircle(Brand, radius = 18f, center = Offset(x, cy))
+                // chevrons
+                drawLine(
+                    Color.White, Offset(x - 9f, cy - 5f), Offset(x - 4f, cy), 3f
+                )
+                drawLine(
+                    Color.White, Offset(x - 9f, cy + 5f), Offset(x - 4f, cy), 3f
+                )
+                drawLine(
+                    Color.White, Offset(x + 4f, cy - 5f), Offset(x + 9f, cy), 3f
+                )
+                drawLine(
+                    Color.White, Offset(x + 4f, cy + 5f), Offset(x + 9f, cy), 3f
                 )
             }
-        }
 
-        // Labels
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomCenter)
-                .padding(8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Label("BEFORE", Color(0xFFF7D6E0))
-            Label("AFTER", Color(0xFFD6E4F7))
+            // transient badges only while dragging
+            if (isDragging) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopCenter)
+                        .padding(top = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    Text(
+                        "BEFORE",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.5.sp,
+                        color = Color.White,
+                        modifier = Modifier
+                            .background(Color(0xB3000000), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                    Text(
+                        "AFTER",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.5.sp,
+                        color = Color.White,
+                        modifier = Modifier
+                            .background(Color(0xB3302855), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
         }
     }
 }
 
-@Composable
-private fun Label(text: String, bgColor: Color) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = bgColor.copy(alpha = 0.85f),
-        modifier = Modifier.shadow(2.dp, RoundedCornerShape(12.dp))
-    ) {
-        Text(
-            text,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color(0xFF5C5470),
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-            fontFamily = FontFamily.Default
-        )
-    }
-}
+// ── Flat control cards ─────────────────────────────────────────────────────
 
+/** Flat white card with a single hairline border — no nested boxes. */
 @Composable
-private fun ModelSelector(
-    models: List<Engine.ModelInfo>,
-    selected: Engine.ModelInfo,
-    onSelect: (Engine.ModelInfo) -> Unit
+private fun FlatCard(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit
 ) {
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .shadow(4.dp, RoundedCornerShape(16.dp))
-            .background(
-                Brush.linearGradient(
-                    listOf(Color(0xFFFFFBF7), Color(0xFFFDF6F0))
-                ),
-                RoundedCornerShape(16.dp)
-            )
-            .border(
-                1.dp,
-                Brush.horizontalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFE8D9CE))),
-                RoundedCornerShape(16.dp)
-            )
-            .padding(12.dp)
-    ) {
-        Text(
-            "Model",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            color = Color(0xFF5C5470),
-            fontFamily = FontFamily.Serif
-        )
+        modifier = modifier
+            .shadow(2.dp, RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(16.dp))
+            .background(SurfaceFlat)
+            .padding(14.dp),
+        content = content
+    )
+}
+
+/** Card section label — consistent typography. */
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.8.sp,
+        color = TextSecondary
+    )
+}
+
+// ── On-device model panel (dropdown) ───────────────────────────────────────
+
+@Composable
+private fun DevicePanel(
+    selected: Engine.ModelInfo,
+    onSelect: (Engine.ModelInfo) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    FlatCard(modifier) {
+        SectionLabel("Model")
         Spacer(Modifier.height(8.dp))
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = it }
         ) {
-            items(models) { model ->
-                ModelChip(
-                    label = model.label,
-                    scale = "${model.scale}x",
-                    selected = model == selected,
-                    onClick = { onSelect(model) }
+            OutlinedButton(
+                onClick = { expanded = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = TextPrimary
                 )
+            ) {
+                Text(
+                    selected.label,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text("▾", color = BrandDark)
+            }
+
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                modifier = Modifier
+                    .exposedDropdownSize()
+                    .background(SurfaceFlat)
+            ) {
+                Engine.MODELS.forEach { model ->
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(
+                                    model.label,
+                                    fontSize = 14.sp,
+                                    fontWeight = if (model == selected) FontWeight.Bold else FontWeight.Normal,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    "${model.scale}× upscale" + if (!model.bundled) " · large" else " · fast",
+                                    fontSize = 12.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        },
+                        leadingIcon = if (model == selected) {
+                            { Text("✓", color = BrandDark, fontWeight = FontWeight.Bold) }
+                        } else null,
+                        onClick = {
+                            onSelect(model)
+                            expanded = false
+                        }
+                    )
+                }
             }
         }
     }
 }
 
+// ── On-device scale panel (preset chips) ───────────────────────────────────
+
 @Composable
-private fun CloudModelSelector(
-    models: List<CloudEngine.CloudModel>,
+private fun DeviceScalePanel(
+    selected: Engine.ModelInfo,
+    useCustom: Boolean,
+    onUseCustomChange: (Boolean) -> Unit,
+    resolution: String,
+    onResolutionChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    FlatCard(modifier) {
+        SectionLabel("Output size")
+        Spacer(Modifier.height(8.dp))
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PresetChip(
+                label = "${selected.scale}×",
+                selected = !useCustom,
+                onClick = { onUseCustomChange(false) }
+            )
+            PresetChip(
+                label = "Original",
+                selected = !useCustom && resolution.equals("original", ignoreCase = true),
+                onClick = {
+                    onUseCustomChange(false)
+                    onResolutionChange("original")
+                }
+            )
+            PresetChip(
+                label = "Custom",
+                selected = useCustom,
+                onClick = { onUseCustomChange(true) }
+            )
+        }
+
+        if (useCustom) {
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = if (resolution.equals("original", true)) "" else resolution,
+                onValueChange = { input ->
+                    onResolutionChange(input.filter { it.isDigit() || it == 'x' || it == 'X' || it == '×' })
+                },
+                placeholder = {
+                    Text(
+                        "e.g. 3840x2160 (locked to aspect)",
+                        color = TextSecondary,
+                        fontSize = 13.sp
+                    )
+                },
+                supportingText = {
+                    val w = selectedBitmapW(selected)
+                    val h = selectedBitmapH(selected)
+                    if (w != null && h != null) {
+                        Text(
+                            "Result keeps ${w}×${h} aspect ratio",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                textStyle = androidx.compose.ui.text.TextStyle(
+                    fontSize = 14.sp,
+                    color = TextPrimary
+                ),
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Brand,
+                    unfocusedBorderColor = BorderSubtle,
+                    cursorColor = Brand,
+                    focusedLabelColor = BrandDark,
+                    unfocusedLabelColor = TextSecondary
+                ),
+                shape = RoundedCornerShape(12.dp)
+            )
+        }
+    }
+}
+
+// helpers reading the selected bitmap dims for the aspect hint
+private fun selectedBitmapW(@Suppress("UNUSED_PARAMETER") model: Engine.ModelInfo): Int? = SelectedBitmapHolder.w
+private fun selectedBitmapH(@Suppress("UNUSED_PARAMETER") model: Engine.ModelInfo): Int? = SelectedBitmapHolder.h
+
+/** Tiny holder so panels can show aspect hints without parameter threading. */
+private object SelectedBitmapHolder {
+    var w: Int? = null
+    var h: Int? = null
+}
+
+@Composable
+private fun PresetChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) BrandContainer else SurfaceInset)
+            .border(
+                1.dp,
+                if (selected) Brand else BorderSubtle,
+                RoundedCornerShape(10.dp)
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        Text(
+            label,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = if (selected) BrandDark else TextSecondary
+        )
+    }
+}
+
+// ── Cloud panels ───────────────────────────────────────────────────────────
+
+@Composable
+private fun CloudPanel(
     selected: CloudEngine.CloudModel,
     onSelect: (CloudEngine.CloudModel) -> Unit,
     apiKey: String,
-    onApiKeyChange: (String) -> Unit
+    onApiKeyChange: (String) -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .shadow(4.dp, RoundedCornerShape(16.dp))
-            .background(
-                Brush.linearGradient(
-                    listOf(Color(0xFFFFFBF7), Color(0xFFFDF6F0))
-                ),
-                RoundedCornerShape(16.dp)
-            )
-            .border(
-                1.dp,
-                Brush.horizontalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFE8D9CE))),
-                RoundedCornerShape(16.dp)
-            )
-            .padding(12.dp)
-    ) {
-        Text(
-            "Cloud Model",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            color = Color(0xFF5C5470),
-            fontFamily = FontFamily.Serif
-        )
+    var expanded by remember { mutableStateOf(false) }
+
+    FlatCard(modifier) {
+        SectionLabel("Cloud model")
         Spacer(Modifier.height(8.dp))
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = it }
         ) {
-            items(models) { model ->
-                ModelChip(
-                    label = model.name,
-                    scale = null,
-                    selected = model == selected,
-                    onClick = { onSelect(model) }
+            OutlinedButton(
+                onClick = { expanded = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
+            ) {
+                Text(
+                    selected.name,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
+                Text("▾", color = BrandDark)
+            }
+
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                modifier = Modifier
+                    .exposedDropdownSize()
+                    .background(SurfaceFlat)
+            ) {
+                CloudEngine.CLOUD_MODELS.forEach { model ->
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(
+                                    model.name,
+                                    fontSize = 14.sp,
+                                    fontWeight = if (model == selected) FontWeight.Bold else FontWeight.Normal,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    model.description,
+                                    fontSize = 12.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        },
+                        leadingIcon = if (model == selected) {
+                            { Text("✓", color = BrandDark, fontWeight = FontWeight.Bold) }
+                        } else null,
+                        onClick = {
+                            onSelect(model)
+                            expanded = false
+                        }
+                    )
+                }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        // API key input
+
+        Spacer(Modifier.height(10.dp))
+        SectionLabel("Replicate API token")
+        Spacer(Modifier.height(6.dp))
         OutlinedTextField(
             value = apiKey,
             onValueChange = onApiKeyChange,
             placeholder = {
-                Text("Replicate API token", color = Color(0xFF9A91A8), fontSize = 13.sp)
+                Text("r8_…", color = TextSecondary, fontSize = 13.sp)
             },
             modifier = Modifier.fillMaxWidth(),
             textStyle = androidx.compose.ui.text.TextStyle(
-                fontSize = 13.sp,
-                color = Color(0xFF5C5470)
+                fontSize = 14.sp,
+                color = TextPrimary
             ),
             singleLine = true,
             colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Color(0xFFB5A6D6),
-                unfocusedBorderColor = Color(0xFFE8D9CE),
-                cursorColor = Color(0xFFB5A6D6)
+                focusedBorderColor = Brand,
+                unfocusedBorderColor = BorderSubtle,
+                cursorColor = Brand
             ),
             shape = RoundedCornerShape(12.dp)
         )
@@ -992,272 +1231,147 @@ private fun CloudModelSelector(
             Text(
                 "Get a free token at replicate.com/account/api-tokens",
                 fontSize = 11.sp,
-                color = Color(0xFF9A91A8),
-                modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+                color = TextSecondary,
+                modifier = Modifier.padding(start = 2.dp, top = 4.dp)
             )
         }
     }
 }
 
 @Composable
-private fun ModelChip(
-    label: String,
-    scale: String?,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        modifier = Modifier
-            .shadow(if (selected) 3.dp else 0.dp, RoundedCornerShape(20.dp)),
-        color = if (selected) Color(0xFFE9E1F5) else Color(0xFFFDF6F0),
-        border = if (selected) {
-            BorderStroke(1.5.dp, Color(0xFFB5A6D6))
-        } else {
-            BorderStroke(1.dp, Color(0xFFE8D9CE))
-        }
-    ) {
-        Row(
-            modifier = Modifier
-                .clickable { onClick() }
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                label,
-                fontSize = 12.sp,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                color = if (selected) Color(0xFF5C5470) else Color(0xFF9A91A8),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (scale != null) {
-                Text(
-                    scale,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFFB5A6D6)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ScaleOptions(
+private fun CloudScalePanel(
     scale: Int,
     onScaleChange: (Int) -> Unit,
-    resolution: String,
-    onResolutionChange: (String) -> Unit,
-    showMultiplier: Boolean
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .shadow(4.dp, RoundedCornerShape(16.dp))
-            .background(
-                Brush.linearGradient(
-                    listOf(Color(0xFFFFFBF7), Color(0xFFFDF6F0))
-                ),
-                RoundedCornerShape(16.dp)
-            )
-            .border(
-                1.dp,
-                Brush.horizontalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFE8D9CE))),
-                RoundedCornerShape(16.dp)
-            )
-            .padding(12.dp)
-    ) {
-        Text(
-            "Scale Options",
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            color = Color(0xFF5C5470),
-            fontFamily = FontFamily.Serif
-        )
-        Spacer(Modifier.height(8.dp))
-
-        if (showMultiplier) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Multiplier:",
-                    fontSize = 12.sp,
-                    color = Color(0xFF9A91A8)
-                )
-                listOf(2, 3, 4).forEach { s ->
-                    ScaleChip(
-                        value = "${s}x",
-                        selected = scale == s,
-                        onClick = { onScaleChange(s) }
-                    )
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-        }
-
-        OutlinedTextField(
-            value = resolution,
-            onValueChange = { input ->
-                onResolutionChange(input.filter { it.isDigit() || it == 'x' || it == 'X' || it == '×' })
-            },
-            placeholder = {
-                Text("Target resolution (e.g., 1920x1080)", color = Color(0xFF9A91A8), fontSize = 13.sp)
-            },
-            modifier = Modifier.fillMaxWidth(),
-            textStyle = androidx.compose.ui.text.TextStyle(
-                fontSize = 13.sp,
-                color = Color(0xFF5C5470)
-            ),
-            singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Color(0xFFB5A6D6),
-                unfocusedBorderColor = Color(0xFFE8D9CE),
-                cursorColor = Color(0xFFB5A6D6)
-            ),
-            shape = RoundedCornerShape(12.dp)
-        )
-    }
-}
-
-@Composable
-private fun ScaleChip(value: String, selected: Boolean, onClick: () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = if (selected) Color(0xFFD9F2E6) else Color(0xFFFDF6F0),
-        border = if (selected) {
-            BorderStroke(1.5.dp, Color(0xFFB5A6D6))
-        } else {
-            BorderStroke(1.dp, Color(0xFFE8D9CE))
-        }
-    ) {
-        Text(
-            value,
-            fontSize = 13.sp,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-            color = if (selected) Color(0xFF5C5470) else Color(0xFF9A91A8),
-            modifier = Modifier
-                .clickable { onClick() }
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-        )
-    }
-}
-
-@Composable
-private fun ActionButtons(
-    isProcessing: Boolean,
-    hasResult: Boolean,
-    showCompare: Boolean,
-    onEnhance: () -> Unit,
-    onCompare: () -> Unit,
-    onSave: () -> Unit,
-    onRepick: () -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        // Re-pick image
-        SkeuButton(
-            label = "New Image",
-            color = Color(0xFFFDF3D7),
-            enabled = !isProcessing,
-            onClick = onRepick,
-            modifier = Modifier.weight(1f)
-        )
-
-        // Enhance button
-        SkeuButton(
-            label = if (isProcessing) "Working…" else "Enhance",
-            color = Color(0xFFB5A6D6),
-            enabled = !isProcessing,
-            onClick = onEnhance,
-            modifier = Modifier.weight(1.4f)
-        )
-    }
-
-    if (hasResult) {
-        Spacer(Modifier.height(10.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            SkeuButton(
-                label = if (showCompare) "Preview" else "Compare",
-                color = Color(0xFFD6E4F7),
-                enabled = !isProcessing,
-                onClick = onCompare,
-                modifier = Modifier.weight(1f)
-            )
-            SkeuButton(
-                label = "Save",
-                color = Color(0xFFD9F2E6),
-                enabled = !isProcessing,
-                onClick = onSave,
-                modifier = Modifier.weight(1f)
-            )
-        }
-    }
-}
-
-/**
- * Skeuomorphic raised button: solid pastel body with a light bevel top edge,
- * dark bevel bottom edge and a pressed state that inverts the bevel.
- */
-@Composable
-private fun SkeuButton(
-    label: String,
-    color: Color,
-    enabled: Boolean,
-    onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val shape = RoundedCornerShape(14.dp)
-    // darker and lighter variants of the body color
-    val bodyDark = darken(color, 0.82f)
-    val bodyLight = lighten(color, 0.55f)
-    val edgeLight = lighten(color, 0.9f)
-    val edgeDark = darken(color, 0.6f)
+    FlatCard(modifier) {
+        SectionLabel("Upscale multiplier")
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(2, 4).forEach { s ->
+                PresetChip(
+                    label = "${s}×",
+                    selected = scale == s,
+                    onClick = { onScaleChange(s) }
+                )
+            }
+        }
+    }
+}
 
+// ── Action flow (CTA hierarchy) ────────────────────────────────────────────
+
+/**
+ * Single clear hierarchy:
+ *  - before processing: wide brand "Enhance" + quiet outline "New Image"
+ *  - after processing:  prominent brand "Save to Gallery" + outline "Enhance Again"/"New Image"
+ */
+@Composable
+private fun ActionFlow(
+    isProcessing: Boolean,
+    hasResult: Boolean,
+    onEnhance: () -> Unit,
+    onRepick: () -> Unit,
+    onSave: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier) {
+        if (hasResult) {
+            // primary CTA becomes Save
+            PrimaryButton(
+                label = "Save to Gallery",
+                onClick = onSave,
+                enabled = !isProcessing,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                SecondaryButton(
+                    label = "Enhance Again",
+                    onClick = onEnhance,
+                    enabled = !isProcessing,
+                    modifier = Modifier.weight(1f)
+                )
+                SecondaryButton(
+                    label = "New Image",
+                    onClick = onRepick,
+                    enabled = !isProcessing,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        } else {
+            PrimaryButton(
+                label = if (isProcessing) "Working…" else "Enhance",
+                onClick = onEnhance,
+                enabled = !isProcessing,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(10.dp))
+            SecondaryButton(
+                label = "New Image",
+                onClick = onRepick,
+                enabled = !isProcessing,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+/** Brand primary button — the single strong color on screen. */
+@Composable
+private fun PrimaryButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
     Box(
         modifier = modifier
             .alpha(if (enabled) 1f else 0.55f)
-            .shadow(
-                elevation = if (enabled) 5.dp else 1.dp,
-                shape = shape,
-                ambientColor = Color(0xFF5C5470).copy(alpha = 0.45f),
-                spotColor = Color(0xFF5C5470).copy(alpha = 0.45f)
-            )
-            .clip(shape)
-            .background(Brush.verticalGradient(listOf(bodyLight, color, bodyDark)), shape)
-            .border(1.dp, Brush.verticalGradient(listOf(edgeLight, edgeDark)), shape)
+            .shadow(4.dp, RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(14.dp))
+            .background(Brush.verticalGradient(listOf(Brand, BrandDark)))
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 13.dp),
+            .padding(vertical = 15.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             label,
-            fontSize = 14.sp,
+            fontSize = 16.sp,
             fontWeight = FontWeight.Bold,
-            color = Color(0xFF4A4358),
-            fontFamily = FontFamily.Default,
-            textAlign = TextAlign.Center,
+            color = TextOnBrand,
             maxLines = 1
         )
     }
 }
 
-/** Darken a pastel color toward its shadow tone. */
-private fun darken(c: Color, factor: Float): Color =
-    Color(red = c.red * factor, green = c.green * factor, blue = c.blue * factor, alpha = c.alpha)
-
-/** Lighten a pastel color toward its highlight tone. */
-private fun lighten(c: Color, factor: Float): Color = Color(
-    red = c.red + (1f - c.red) * factor,
-    green = c.green + (1f - c.green) * factor,
-    blue = c.blue + (1f - c.blue) * factor,
-    alpha = c.alpha
-)
+/** Neutral secondary button — outline style. */
+@Composable
+private fun SecondaryButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    Box(
+        modifier = modifier
+            .alpha(if (enabled) 1f else 0.55f)
+            .clip(RoundedCornerShape(14.dp))
+            .background(SurfaceFlat)
+            .border(1.dp, BorderSubtle, RoundedCornerShape(14.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 13.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            color = TextSecondary,
+            maxLines = 1
+        )
+    }
+}
