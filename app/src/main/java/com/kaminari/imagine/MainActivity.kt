@@ -12,6 +12,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.drag
@@ -50,6 +56,7 @@ import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import kotlinx.coroutines.Dispatchers
+import kotlin.math.sin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -69,6 +76,7 @@ class MainActivity : ComponentActivity() {
     private var scaleMultiplier by mutableIntStateOf(4)
     private var targetResolution by mutableStateOf("")
     private var cloudApiKey by mutableStateOf("")
+    private var enhanceProgress by mutableFloatStateOf(0f)
     private var crashReporter: CrashReporter? = null
 
     override fun attachBaseContext(newBase: android.content.Context) {
@@ -168,7 +176,7 @@ class MainActivity : ComponentActivity() {
 
             Spacer(Modifier.height(20.dp))
 
-            // Image area
+            // Image area — aspect ratio follows the image itself
             if (selectedBitmap == null) {
                 EmptyStateSection {
                     if (storagePermission.status.isGranted) {
@@ -189,6 +197,7 @@ class MainActivity : ComponentActivity() {
                     bitmap = enhancedBitmap ?: selectedBitmap!!,
                     isProcessing = isProcessing,
                     processingStatus = processingStatus,
+                    progress = enhanceProgress,
                     isEnhanced = enhancedBitmap != null
                 )
             }
@@ -252,12 +261,16 @@ class MainActivity : ComponentActivity() {
                     },
                     onCompare = { showCompare = !showCompare },
                     onSave = {
-                        enhancedBitmap?.let { saveImage(it, context) }
+                        enhancedBitmap?.let { bmp ->
+                            scope.launch { saveImage(bmp, context) }
+                        }
                     },
-                    onReset = {
-                        selectedBitmap = null
-                        enhancedBitmap = null
-                        showCompare = false
+                    onRepick = {
+                        if (storagePermission.status.isGranted) {
+                            imagePicker.launch("image/*")
+                        } else {
+                            storagePermission.launchPermissionRequest()
+                        }
                     }
                 )
             }
@@ -268,6 +281,7 @@ class MainActivity : ComponentActivity() {
         val bitmap = selectedBitmap ?: return
         isProcessing = true
         enhancedBitmap = null
+        enhanceProgress = 0f
 
         try {
             withContext(Dispatchers.IO) {
@@ -298,7 +312,10 @@ class MainActivity : ComponentActivity() {
                         return@withContext
                     }
                     processingStatus = "Enhancing on GPU..."
-                    val result = Engine.process(bitmap)
+                    val result = Engine.process(bitmap) { fraction ->
+                        enhanceProgress = fraction
+                        processingStatus = "Enhancing… ${(fraction * 100).toInt()}%"
+                    }
                     processingStatus = ""
                     enhancedBitmap = result?.let { applyTargetResolution(it) }
                     if (result != null) {
@@ -320,6 +337,7 @@ class MainActivity : ComponentActivity() {
         } finally {
             isProcessing = false
             processingStatus = ""
+            enhanceProgress = 0f
         }
     }
 
@@ -360,25 +378,52 @@ class MainActivity : ComponentActivity() {
         return bmp
     }
 
-    private fun saveImage(bitmap: Bitmap, context: android.content.Context) {
-        try {
-            val values = android.content.ContentValues().apply {
-                put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "imagine_${System.currentTimeMillis()}.png")
-                put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
-                put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, android.os.Build.VERSION.SDK_INT.let {
-                    if (it >= 29) "Pictures/Imagine" else null
-                })
+    /** Save to MediaStore. Runs on IO; JPEG keeps 4K-size results from ballooning memory. */
+    private suspend fun saveImage(bitmap: Bitmap, context: android.content.Context) {
+        withContext(Dispatchers.IO) {
+            try {
+                // very large bitmaps: drop to JPEG-95 to bound encode time/memory.
+                // PNG of a 4x upscale can exceed 100 MB and trigger OOM/ANR.
+                val format = if (bitmap.byteCount > 64 * 1024 * 1024) {
+                    Bitmap.CompressFormat.JPEG
+                } else {
+                    Bitmap.CompressFormat.PNG
+                }
+                val quality = if (format == Bitmap.CompressFormat.JPEG) 95 else 100
+
+                val name = "imagine_${System.currentTimeMillis()}" +
+                    if (format == Bitmap.CompressFormat.JPEG) ".jpg" else ".png"
+
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
+                    put(android.provider.MediaStore.Images.Media.MIME_TYPE,
+                        if (format == Bitmap.CompressFormat.JPEG) "image/jpeg" else "image/png")
+                    if (android.os.Build.VERSION.SDK_INT >= 29) {
+                        put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Imagine")
+                    }
+                }
+                val uri = context.contentResolver.insert(
+                    android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values
+                ) ?: throw IllegalStateException("Cannot create MediaStore entry")
+
+                context.contentResolver.openOutputStream(uri, "w")?.use { out ->
+                    out.buffered(1 shl 16)
+                    if (!bitmap.compress(format, quality, out)) {
+                        throw IllegalStateException("Compression failed")
+                    }
+                    out.flush()
+                } ?: throw IllegalStateException("Cannot open output stream")
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Saved to Pictures/Imagine", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Throwable) {
+                Log.e("Imagine", "save failed", e)
+                CrashReporter.log(context, "Save", "save failed", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Save failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
             }
-            val uri = context.contentResolver.insert(
-                android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values
-            ) ?: throw IllegalStateException("Cannot create MediaStore entry")
-            context.contentResolver.openOutputStream(uri)?.use { out ->
-                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) throw IllegalStateException("Compression failed")
-            }
-            Toast.makeText(context, "Saved to Pictures/Imagine", Toast.LENGTH_LONG).show()
-        } catch (e: Exception) {
-            Toast.makeText(context, "Save failed: ${e.message}", Toast.LENGTH_SHORT).show()
-            CrashReporter.log(context, "Save", "save failed", e)
         }
     }
 }
@@ -526,14 +571,19 @@ private fun PreviewSection(
     bitmap: Bitmap,
     isProcessing: Boolean,
     processingStatus: String,
+    progress: Float,
     isEnhanced: Boolean
 ) {
+    val aspectRatio = bitmap.width.toFloat() / bitmap.height
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(300.dp)
+            // the frame hugs the image's own aspect ratio (capped so tall
+            // images don't eat the whole screen)
+            .aspectRatio(aspectRatio.coerceIn(0.55f, 1.9f))
             .shadow(12.dp, RoundedCornerShape(28.dp))
             .clip(RoundedCornerShape(28.dp))
+            .background(Color(0xFFEFEBE6))
             .border(
                 1.dp,
                 Brush.horizontalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFE8D9CE))),
@@ -548,6 +598,15 @@ private fun PreviewSection(
             contentScale = ContentScale.Fit
         )
 
+        // Water-fill progress: liquid rises from the bottom with animated waves
+        if (isProcessing) {
+            WaterFillProgress(
+                progress = progress,
+                status = processingStatus,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
         if (isEnhanced && !isProcessing) {
             Box(
                 modifier = Modifier
@@ -557,31 +616,98 @@ private fun PreviewSection(
                 Label("ENHANCED", Color(0xFFD9F2E6))
             }
         }
+    }
+}
 
-        if (isProcessing) {
-            // Processing overlay
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xAAFFFFFF)),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(
-                        color = Color(0xFFB5A6D6),
-                        strokeWidth = 3.dp,
-                        modifier = Modifier.size(40.dp)
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        processingStatus.ifBlank { "Processing..." },
-                        fontSize = 14.sp,
-                        color = Color(0xFF5C5470),
-                        fontFamily = FontFamily.Default
-                    )
+/**
+ * Liquid progress overlay: the area below the water line is tinted,
+ * the surface is two sine waves drifting horizontally, and the fill
+ * height tracks [progress] (0..1). A status line floats above the water.
+ */
+@Composable
+private fun WaterFillProgress(
+    progress: Float,
+    status: String,
+    modifier: Modifier = Modifier
+) {
+    // two phases so the waves feel alive
+    val transition = rememberInfiniteTransition(label = "water")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(2400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "phase"
+    )
+
+    val fillFraction = (progress.coerceIn(0f, 1f))
+
+    Box(modifier) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val waterY = h * (1f - fillFraction)
+
+            // wave geometry: front wave big, back wave small and offset
+            fun wavePath(amplitude: Float, wavelength: Float, phaseShift: Float): Path {
+                val path = Path()
+                path.moveTo(0f, h)
+                var x = 0f
+                while (x <= w) {
+                    val y = waterY + amplitude * sin((x / wavelength) * (2f * Math.PI).toFloat() + phase + phaseShift)
+                    if (x == 0f) path.lineTo(0f, y) else path.lineTo(x, y)
+                    x += 8f
                 }
+                path.lineTo(w, h)
+                path.close()
+                return path
             }
+
+            // back wave (lighter, translucent)
+            drawPath(
+                path = wavePath(amplitude = 10f, wavelength = 260f, phaseShift = 1.2f),
+                color = Color(0xFFB5A6D6).copy(alpha = 0.25f)
+            )
+            // front wave (stronger tint)
+            drawPath(
+                path = wavePath(amplitude = 16f, wavelength = 180f, phaseShift = 0f),
+                color = Color(0xFFB5A6D6).copy(alpha = 0.45f)
+            )
+            // crisp water line
+            drawLine(
+                color = Color(0xFF9C89C4).copy(alpha = 0.8f),
+                start = Offset(0f, waterY),
+                end = Offset(w, waterY),
+                strokeWidth = 2f
+            )
         }
+
+        // status text floats above the water line
+        Text(
+            text = if (status.isNotBlank()) status else "Enhancing…",
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color(0xFF5C5470),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 12.dp)
+                .background(Color(0xCCFDF6F0), RoundedCornerShape(10.dp))
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+        )
+
+        // percentage badge
+        Text(
+            text = "${(fillFraction * 100).toInt()}%",
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color(0xFF5C5470),
+            modifier = Modifier
+                .align(Alignment.Center)
+                .background(Color(0xCCFDF6F0), RoundedCornerShape(12.dp))
+                .padding(horizontal = 16.dp, vertical = 6.dp)
+        )
     }
 }
 
@@ -593,13 +719,16 @@ private fun ComparisonSection(
     onSliderChange: (Float) -> Unit
 ) {
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    val aspectRatio = before.width.toFloat() / before.height
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(300.dp)
+            // frame matches the image aspect ratio (capped for extreme shapes)
+            .aspectRatio(aspectRatio.coerceIn(0.55f, 1.9f))
             .shadow(12.dp, RoundedCornerShape(28.dp))
             .clip(RoundedCornerShape(28.dp))
+            .background(Color(0xFFEFEBE6))
             .border(
                 1.dp,
                 Brush.horizontalGradient(listOf(Color(0xFFFFFFFF), Color(0xFFE8D9CE))),
@@ -986,23 +1115,37 @@ private fun ActionButtons(
     onEnhance: () -> Unit,
     onCompare: () -> Unit,
     onSave: () -> Unit,
-    onReset: () -> Unit
+    onRepick: () -> Unit
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Enhance button
+        // Re-pick image
         SkeuButton(
-            label = if (isProcessing) "Processing..." else "Enhance",
-            color = Color(0xFFB5A6D6),
+            label = "New Image",
+            color = Color(0xFFFDF3D7),
             enabled = !isProcessing,
-            onClick = onEnhance,
+            onClick = onRepick,
             modifier = Modifier.weight(1f)
         )
 
-        if (hasResult) {
-            // Compare button
+        // Enhance button
+        SkeuButton(
+            label = if (isProcessing) "Working…" else "Enhance",
+            color = Color(0xFFB5A6D6),
+            enabled = !isProcessing,
+            onClick = onEnhance,
+            modifier = Modifier.weight(1.4f)
+        )
+    }
+
+    if (hasResult) {
+        Spacer(Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             SkeuButton(
                 label = if (showCompare) "Preview" else "Compare",
                 color = Color(0xFFD6E4F7),
@@ -1010,8 +1153,6 @@ private fun ActionButtons(
                 onClick = onCompare,
                 modifier = Modifier.weight(1f)
             )
-
-            // Save button
             SkeuButton(
                 label = "Save",
                 color = Color(0xFFD9F2E6),
@@ -1021,18 +1162,12 @@ private fun ActionButtons(
             )
         }
     }
-
-    if (hasResult) {
-        Spacer(Modifier.height(8.dp))
-        TextButton(
-            onClick = onReset,
-            colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF9A91A8))
-        ) {
-            Text("Reset", fontSize = 13.sp)
-        }
-    }
 }
 
+/**
+ * Skeuomorphic raised button: solid pastel body with a light bevel top edge,
+ * dark bevel bottom edge and a pressed state that inverts the bevel.
+ */
 @Composable
 private fun SkeuButton(
     label: String,
@@ -1041,37 +1176,49 @@ private fun SkeuButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val alpha = if (enabled) 1f else 0.5f
+    val shape = RoundedCornerShape(14.dp)
+    // darker and lighter variants of the body color
+    val bodyDark = darken(color, 0.82f)
+    val bodyLight = lighten(color, 0.55f)
+    val edgeLight = lighten(color, 0.9f)
+    val edgeDark = darken(color, 0.6f)
+
     Box(
         modifier = modifier
-            .alpha(alpha)
-            .shadow(4.dp, RoundedCornerShape(16.dp))
-            .clip(RoundedCornerShape(16.dp))
-            .background(
-                Brush.verticalGradient(
-                    listOf(
-                        Color.White.copy(alpha = 0.6f),
-                        color.copy(alpha = 0.3f)
-                    )
-                ),
-                RoundedCornerShape(16.dp)
+            .alpha(if (enabled) 1f else 0.55f)
+            .shadow(
+                elevation = if (enabled) 5.dp else 1.dp,
+                shape = shape,
+                ambientColor = Color(0xFF5C5470).copy(alpha = 0.45f),
+                spotColor = Color(0xFF5C5470).copy(alpha = 0.45f)
             )
-            .border(
-                1.dp,
-                color.copy(alpha = 0.4f),
-                RoundedCornerShape(16.dp)
-            )
-            .clickable(enabled) { onClick() }
-            .padding(vertical = 14.dp),
+            .clip(shape)
+            .background(Brush.verticalGradient(listOf(bodyLight, color, bodyDark)), shape)
+            .border(1.dp, Brush.verticalGradient(listOf(edgeLight, edgeDark)), shape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 13.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             label,
             fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color(0xFF5C5470),
+            fontWeight = FontWeight.Bold,
+            color = Color(0xFF4A4358),
             fontFamily = FontFamily.Default,
-            textAlign = TextAlign.Center
+            textAlign = TextAlign.Center,
+            maxLines = 1
         )
     }
 }
+
+/** Darken a pastel color toward its shadow tone. */
+private fun darken(c: Color, factor: Float): Color =
+    Color(red = c.red * factor, green = c.green * factor, blue = c.blue * factor, alpha = c.alpha)
+
+/** Lighten a pastel color toward its highlight tone. */
+private fun lighten(c: Color, factor: Float): Color = Color(
+    red = c.red + (1f - c.red) * factor,
+    green = c.green + (1f - c.green) * factor,
+    blue = c.blue + (1f - c.blue) * factor,
+    alpha = c.alpha
+)

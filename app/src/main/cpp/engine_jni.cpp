@@ -17,10 +17,43 @@
 static RealESRGAN* g_realesrgan = nullptr;
 static bool g_gpu_init = false;
 
+// Kotlin progress callback: Engine.reportProgress(float) — called per completed tile
+static JavaVM* g_vm = nullptr;
+static jobject g_progress_obj = nullptr;
+static jmethodID g_progress_method = nullptr;
+
+static void cache_callback(JNIEnv* env, jobject progressSink) {
+    if (g_progress_obj) {
+        env->DeleteGlobalRef(g_progress_obj);
+        g_progress_obj = nullptr;
+    }
+    if (progressSink) {
+        g_progress_obj = env->NewGlobalRef(progressSink);
+        g_progress_method = env->GetMethodID(env->GetObjectClass(progressSink), "onProgress", "(F)V");
+    } else {
+        g_progress_method = nullptr;
+    }
+}
+
+// called from inside RealESRGAN::process on the worker thread
+static float forward_progress(float fraction) {
+    if (!g_vm || !g_progress_obj || !g_progress_method) return 0.f;
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return 0.f;
+        attached = true;
+    }
+    env->CallVoidMethod(g_progress_obj, g_progress_method, (jfloat)fraction);
+    if (attached) g_vm->DetachCurrentThread();
+    return 0.f;
+}
+
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     JNIEnv* env;
     if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK)
         return -1;
+    g_vm = vm;
     return JNI_VERSION_1_6;
 }
 
@@ -96,10 +129,15 @@ Java_com_kaminari_imagine_Engine_loadModel(JNIEnv* env, jobject thiz,
     return JNI_TRUE;
 }
 
-// process image: RGBA byte array in, RGBA byte array out
+// progress hook symbol from realesrgan.cpp
+extern float (*realesrgan_progress_hook)(float);
+
+// process image: RGBA byte array in, RGBA byte array out.
+// progressSink: optional object with onProgress(F)V called per tile (0..1)
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_kaminari_imagine_Engine_processImage(JNIEnv* env, jobject thiz,
-                                              jbyteArray input, jint width, jint height) {
+                                              jbyteArray input, jint width, jint height,
+                                              jobject progressSink) {
     if (!g_realesrgan) {
         LOGE("Model not loaded");
         return nullptr;
@@ -129,6 +167,10 @@ Java_com_kaminari_imagine_Engine_processImage(JNIEnv* env, jobject thiz,
     const int outH = (int)outH64;
     const jsize outSize = (jsize)outSize64;
 
+    // install per-tile progress hook while processing
+    cache_callback(env, progressSink);
+    realesrgan_progress_hook = progressSink ? &forward_progress : nullptr;
+
     // Build input/output exactly like upstream main.cpp:
     //   inimage  = Mat(w, h, (void*)data, (size_t)c, c)
     //   outimage = Mat(w*scale, h*scale, (size_t)c, c)
@@ -138,6 +180,14 @@ Java_com_kaminari_imagine_Engine_processImage(JNIEnv* env, jobject thiz,
 
     LOGI("Processing %dx%d -> %dx%d (tile %d)", width, height, outW, outH, g_realesrgan->tilesize);
     int ret = g_realesrgan->process(inimage, outimage);
+
+    // always detach the hook before returning
+    realesrgan_progress_hook = nullptr;
+    if (g_progress_obj) {
+        env->DeleteGlobalRef(g_progress_obj);
+        g_progress_obj = nullptr;
+        g_progress_method = nullptr;
+    }
 
     env->ReleaseByteArrayElements(input, inputData, JNI_ABORT);
 

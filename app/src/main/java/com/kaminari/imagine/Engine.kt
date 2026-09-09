@@ -30,7 +30,7 @@ object Engine {
     external fun initGpu(): Boolean
     external fun gpuCount(): Int
     external fun loadModel(paramPath: String, binPath: String, scale: Int, tilesize: Int, prepadding: Int): Boolean
-    external fun processImage(input: ByteArray, width: Int, height: Int): ByteArray?
+    external fun processImage(input: ByteArray, width: Int, height: Int, progressSink: Any?): ByteArray?
     external fun destroy()
 
     /** True if the native library loaded successfully. */
@@ -123,7 +123,7 @@ object Engine {
     }
 
     /** Enhance a bitmap. Returns upscaled bitmap or null on failure. */
-    fun process(bitmap: Bitmap): Bitmap? {
+    fun process(bitmap: Bitmap, onProgress: (Float) -> Unit = {}): Bitmap? {
         if (!nativeAvailable) return null
         val w = bitmap.width
         val h = bitmap.height
@@ -132,8 +132,13 @@ object Engine {
         val rgba = ByteArray(w * h * 4)
         bitmap.copyPixelsToBuffer(ByteBuffer.wrap(rgba))
 
+        val sink = object {
+            @Suppress("unused")
+            fun onProgress(fraction: Float) { onProgress(fraction) }
+        }
+
         val outBytes = try {
-            processImage(rgba, w, h) ?: return null
+            processImage(rgba, w, h, sink) ?: return null
         } catch (e: Throwable) {
             Log.e(TAG, "processImage failed", e)
             return null

@@ -9,3 +9,8 @@
 .externalNativeBuild
 .cxx
 app/ncnn-android/
+
+# release signing — keystore and credentials must never enter git
+*.jks
+*.keystore
+keystore.properties

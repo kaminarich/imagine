@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <vector>
 
+// progress hook installed by the JNI bridge (0..1 per completed tile)
+float (*realesrgan_progress_hook)(float) = 0;
+
 static const uint32_t realesrgan_preproc_spv_data[] = {
     #include "realesrgan_preproc.spv.hex.h"
 };
@@ -550,7 +553,14 @@ int RealESRGAN::process(const ncnn::Mat& inimage, ncnn::Mat& outimage) const
                 cmd.reset();
             }
 
-            fprintf(stderr, "%.2f%%\n", (float)(yi * xtiles + xi) / (ytiles * xtiles) * 100);
+            if (realesrgan_progress_hook)
+            {
+                realesrgan_progress_hook((float)(yi * xtiles + xi + 1) / (ytiles * xtiles));
+            }
+            else
+            {
+                fprintf(stderr, "%.2f%%\n", (float)(yi * xtiles + xi) / (ytiles * xtiles) * 100);
+            }
         }
 
         // download

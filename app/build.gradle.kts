@@ -1,7 +1,27 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// Release signing: env vars (CI) or an untracked keystore.properties (local).
+// The keystore itself never lives in git.
+fun signingValue(envName: String, propName: String): String? =
+    System.getenv(envName) ?: keystoreProps.getProperty(propName)
+
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) FileInputStream(keystorePropsFile).use { load(it) }
+}
+
+val ksStorePath = signingValue("KEYSTORE_FILE", "storeFile") ?: "release.jks"
+val ksStorePassword = signingValue("KEYSTORE_PASSWORD", "storePassword")
+val ksKeyAlias = signingValue("KEY_ALIAS", "keyAlias")
+val ksKeyPassword = signingValue("KEY_PASSWORD", "keyPassword")
+val ksFile = rootProject.file(ksStorePath).takeIf { it.exists() }
+    ?: file(ksStorePath).takeIf { it.exists() }
 
 android {
     namespace = "com.kaminari.imagine"
@@ -27,11 +47,12 @@ android {
 
     signingConfigs {
         create("release") {
-            // CI convenience: sign with the debug keystore so the APK is directly installable
-            storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+            if (ksFile != null && !ksStorePassword.isNullOrBlank() && !ksKeyAlias.isNullOrBlank() && !ksKeyPassword.isNullOrBlank()) {
+                storeFile = ksFile
+                storePassword = ksStorePassword
+                keyAlias = ksKeyAlias
+                keyPassword = ksKeyPassword
+            }
         }
     }
 
@@ -39,7 +60,12 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = if (signingConfigs.getByName("release").storeFile != null) {
+                signingConfigs.getByName("release")
+            } else {
+                // fall back to the debug key so local builds without a keystore still install
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
