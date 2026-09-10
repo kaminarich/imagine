@@ -85,34 +85,20 @@ jobs:
       - name: Write release notes
         run: |
           cat > release-notes.md << 'HEREDOC_END'
-          ## Changes in v1.0.0
+          ## Changes in v1.1.0
 
-          ### Cloud Enhancements
-          - **Real error messages** — CloudEngine now surfaces actual Replicate API errors (HTTP status, error detail) instead of a generic failure message
-          - Fixed model version resolution — uses latest_version.id from the /v1/models endpoint
-          - Correct per-model input schemas: Real-ESRGAN, CodeFormer, GFPGAN
-          - Upload via /v1/files multipart (was base64 data URL) — supports larger images
-          - Sync-mode prediction with Prefer: wait header, then polls every 2s for ~5 min
-          - All cloud requests include Authorization: Bearer token
+          ### Design
+          - App icon now sits beside the Imagine title in the dashboard header
 
-          ### Core Fixes
-          - Fixed x4 crash: clamp output bitmaps before drawing
-          - Restored RoundedCornerShape import
-          - GPU init failure no longer crashes app
-
-          ### Build
-          - GitHub Actions CI builds a signed release APK on every push to main
-          - APK attached to this release
-
-          **Full changelog**: https://github.com/kaminarich/imagine/commits/v1.0.0
+          **Full changelog**: https://github.com/kaminarich/imagine/commits/v1.1.0
           HEREDOC_END
 
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0
-          name: "Imagine v1.0.0"
+          tag_name: v1.1.0
+          name: "Imagine v1.1.0"
           draft: false
           prerelease: false
           body_path: release-notes.md
