@@ -35,3 +35,7 @@ Requirements when building locally: JDK 17, Android SDK 34, NDK 26.1.10909125, C
 
 - [Real-ESRGAN-ncnn-vulkan](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan) (MIT) — inference core, vendored in `app/src/main/cpp/`
 - [ncnn](https://github.com/Tencent/ncnn) — neural network inference framework
+
+## License
+
+[MIT](LICENSE)
