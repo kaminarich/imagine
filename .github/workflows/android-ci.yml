@@ -80,28 +80,28 @@ jobs:
 
       - name: Write release notes
         run: |
-          cat > /tmp/release-notes.md << 'EOF'
-**Changes in v1.0.0**
+          cat > /tmp/release-notes.md << 'HEREDOC_END'
+          "**Changes in v1.0.0**
+          
+          ### Cloud Enhancements
+          - **Real error messages** — CloudEngine now surfaces actual Replicate API errors (HTTP status, error detail) instead of generic 'Failed to create prediction'
+          - Fixed model version resolution — uses latest_version.id from /v1/models endpoint
+          - Correct per-model input schemas: Real-ESRGAN (image + scale + face_enhance), CodeFormer (image + upscale + fidelity/background/face params), GFPGAN (img + scale)
+          - Upload via /v1/files multipart (was base64 data URL) — supports larger images
+          - Sync-mode prediction with Prefer: wait header (up to 60s), then polls every 2s for ~5 min
+          - All cloud requests include Authorization: Bearer <token> (was Token)
 
-### Cloud Enhancements
-- **Real error messages** — CloudEngine now surfaces actual Replicate API errors (HTTP status, error detail) instead of generic "Failed to create prediction"
-- Fixed model version resolution — uses \`latest_version.id\` from \`/v1/models\` endpoint
-- Correct per-model input schemas: Real-ESRGAN (\`image\` + \`scale\` + \`face_enhance\`), CodeFormer (\`image\` + \`upscale\` + fidelity/background/face params), GFPGAN (\`img\` + \`scale\`)
-- Upload via \`/v1/files\` multipart (was base64 data URL) — supports larger images
-- Sync-mode prediction with \`Prefer: wait\` header (up to 60s), then polls every 2s for ~5 min
-- All cloud requests include \`Authorization: Bearer <token>\` (was \`Token\`)
+          ### Core Fixes
+          - Fixed x4 crash: clamp output bitmaps to ≤100MB before drawing
+          - Restored RoundedCornerShape import
+          - GPU init failure no longer crashes app
 
-### Core Fixes
-- Fixed x4 crash: clamp output bitmaps to ≤100MB before drawing
-- Restored \`RoundedCornerShape\` import
-- GPU init failure no longer crashes app
+          ### Build
+          - GitHub Actions CI builds signed release APK on every push to main
+          - APK attached to this release
 
-### Build
-- GitHub Actions CI builds signed release APK on every push to main
-- APK attached to this release
-
-**Full changelog**: https://github.com/kaminarich/imagine/commits/v1.0.0
-EOF
+          **Full changelog**: https://github.com/kaminarich/imagine/commits/v1.0.0
+          HEREDOC_END
 
       - name: Create Release
         id: create_release
